@@ -76,8 +76,9 @@ class FetchStage(Module):
     def build(self, pc, stall, pipeline_regs, instruction_memory, decode_stage):
         current_pc = pc[0]
         word_addr = current_pc >> UInt(XLEN)(2)
+        instruction = UInt(XLEN)(0)
 
-        instruction = stall[0].select(UInt(XLEN)(0), instruction_memory[word_addr])
+        instruction = stall[0].select(instruction, instruction_memory[word_addr])
         with Condition(~stall[0]):
             pipeline_regs[0].if_id_pc = current_pc
             log("IF: PC={:08x}, Instruction={:08x}", current_pc, instruction)
@@ -109,177 +110,118 @@ class DecodeStage(Module):
         
         
         # 如果指令无效，直接返回，不更新ID/EX寄存器
+        opcode = instruction[6:0]          # bits 6:0
+        rd = instruction[11:7]             # bits 11:7
+        func3 = instruction[14:12]          # bits 14:12
+        rs1 = instruction[19:15]           # bits 19:15
+        rs2 = instruction[24:20]           # bits 24:20
+        funct7 = instruction[31:25]         # bits 31:25
+
+        # 提取立即数
+        immediate_i = instruction[31:20].sext(Int(32)).bitcast(UInt(32))  # I型立即数
+        immediate_s = concat(instruction[31:25], instruction[11:7]).sext(Int(32)).bitcast(UInt(32))  # S型立即数
+        immediate_b = concat(instruction[31:31], instruction[7:7], instruction[30:25], instruction[11:8], UInt(1)(0)).sext(Int(32)).bitcast(UInt(32))  # B型立即数
+        immediate_u = (instruction[31:12] << UInt(XLEN)(12)).sext(Int(32)).bitcast(UInt(32))  # U型立即数
+        immediate_j = concat(instruction[31:31], instruction[19:12], instruction[20:20], instruction[30:21], UInt(1)(0)).sext(Int(32)).bitcast(UInt(32))  # J型立即数
+        
+        # 控制信号解码
+        alu_op = UInt(5)(0)
+        mem_read = UInt(1)(0)
+        mem_write = UInt(1)(0)
+        reg_write = UInt(1)(0)
+        mem_to_reg = UInt(1)(0)
+        alu_src = UInt(2)(0)  # 00:寄存器, 01:立即数, 10:PC
+        branch_op = UInt(3)(0)
+        jump_op = UInt(1)(0)  # 跳转指令标志
+        immediate = UInt(XLEN)(0)  # 初始化立即数
+        
+        is_r_type = (opcode == UInt(7)(0b0110011))
+        is_i_type = (opcode == UInt(7)(0b0010011))
+        is_l_type = (opcode == UInt(7)(0b0000011))
+        is_s_type = (opcode == UInt(7)(0b0100011))
+        is_b_type = (opcode == UInt(7)(0b1100011))
+        is_j_type = (opcode == UInt(7)(0b1101111))
+        is_lui_type = (opcode == UInt(7)(0b0110111))
+        is_auipc_type = (opcode == UInt(7)(0b0010111))
+        alu_op_tmp = UInt(5)(0)
+        alu_op_tmp = ((funct7[5:5] == UInt(1)(1)) & (func3 == UInt(3)(0b000))).select(UInt(5)(0b00001), alu_op_tmp)  # SUB
+        alu_op_tmp = ((funct7[5:5] == UInt(1)(1)) & (func3 == UInt(3)(0b101))).select(UInt(5)(0b00110), alu_op_tmp)  # SRA
+        alu_op_tmp = ((funct7[5:5] == UInt(1)(0)) & (func3 == UInt(3)(0b000))).select(UInt(5)(0b00000), alu_op_tmp)  # ADD
+        alu_op_tmp = (func3 == UInt(3)(0b111)).select(UInt(5)(0b01001), alu_op_tmp)  # AND
+        alu_op_tmp = (func3 == UInt(3)(0b110)).select(UInt(5)(0b01000), alu_op_tmp)  # OR
+        alu_op_tmp = (func3 == UInt(3)(0b100)).select(UInt(5)(0b00100), alu_op_tmp)  # XOR
+        alu_op_tmp = (func3 == UInt(3)(0b010)).select(UInt(5)(0b00011), alu_op_tmp)  # SLT
+        alu_op_tmp = (func3 == UInt(3)(0b011)).select(UInt(5)(0b00111), alu_op_tmp)  # SLTU
+        alu_op_tmp = (func3 == UInt(3)(0b001)).select(UInt(5)(0b00010), alu_op_tmp)  # SLL
+        alu_op_tmp = ((funct7[5:5] == UInt(1)(0)) & (func3 == UInt(3)(0b101))).select(UInt(5)(0b00101), alu_op_tmp)  # SRL
+        alu_op = (is_r_type | is_i_type).select(alu_op_tmp, alu_op)
+        reg_write = (is_r_type | is_i_type).select(UInt(1)(1), reg_write)
+        alu_src = is_r_type.select(UInt(2)(0), alu_src)
+        alu_src = is_i_type.select(UInt(2)(1), alu_src)
+        immediate = is_i_type.select(immediate_i, immediate)
+        
+        mem_read = is_l_type.select(UInt(1)(1), mem_read)  # LW (Load Word)
+        reg_write = is_l_type.select(UInt(1)(1), reg_write)  # x0寄存器不会写入
+        mem_to_reg = is_l_type.select(UInt(1)(1), mem_to_reg)  # LW (Load Word)
+        alu_src = is_l_type.select(UInt(2)(1), alu_src)
+        immediate = is_l_type.select(immediate_i, immediate)
+            
+        store_type_bits = UInt(2)(0)
+        mem_write = is_s_type.select(UInt(1)(1), mem_write)  # SW (Store Word)
+        alu_src = is_s_type.select(UInt(2)(1), alu_src)
+        immediate = is_s_type.select(immediate_s, immediate)
+        store_type_bits = (is_s_type & (func3 == UInt(3)(0b010))).select(UInt(2)(0b10), store_type_bits)  # SW (Store Word)
+        store_type_bits = (is_s_type & (func3 == UInt(3)(0b000))).select(UInt(2)(0b00), store_type_bits)  # SB (Store Byte)
+        store_type_bits = (is_s_type & (func3 == UInt(3)(0b001))).select(UInt(2)(0b01), store_type_bits)  # SH (Store Halfword)
+
+        branch_op_tmp = UInt(3)(0)
+        branch_op_tmp = (func3 == UInt(3)(0b000)).select(UInt(3)(0b001), branch_op_tmp)  # BEQ
+        branch_op_tmp = (func3 == UInt(3)(0b001)).select(UInt(3)(0b010), branch_op_tmp)  # BNE
+        branch_op_tmp = (func3 == UInt(3)(0b100)).select(UInt(3)(0b011), branch_op_tmp)  # BLT
+        branch_op_tmp = (func3 == UInt(3)(0b101)).select(UInt(3)(0b100), branch_op_tmp)  # BGE
+        branch_op_tmp = (func3 == UInt(3)(0b110)).select(UInt(3)(0b101), branch_op_tmp)  # BLTU
+        branch_op_tmp = (func3 == UInt(3)(0b111)).select(UInt(3)(0b110), branch_op_tmp)  # BGEU
+        immediate = is_b_type.select(immediate_b, immediate)
+        branch_op = is_b_type.select(branch_op_tmp, branch_op)
+            
+        reg_write = (is_lui_type | is_auipc_type).select(UInt(1)(1), reg_write)
+        alu_src = is_lui_type.select(UInt(2)(1), alu_src)
+        immediate = (is_lui_type | is_auipc_type).select(immediate_u, immediate)
+        alu_src = is_auipc_type.select(UInt(2)(2), alu_src)
+        
+        reg_write = is_j_type.select(UInt(1)(1), reg_write)
+        alu_src = is_j_type.select(UInt(2)(1), alu_src)
+        immediate = is_j_type.select(immediate_j, immediate)
+        jump_op = is_j_type.select(UInt(1)(1), jump_op)
+        
+        control_signals = concat(
+            alu_op,           # [4:0]   ALU操作码
+            mem_read,         # [5]     内存读
+            mem_write,        # [6]     内存写
+            reg_write,        # [7]     寄存器写
+            mem_to_reg,       # [8]     内存到寄存器
+            UInt(1)(0),       # [9]     保留位
+            alu_src,          # [10:9]  ALU输入选择
+            UInt(6)(0),       # [16:11] 保留位
+            branch_op,        # [19:17] 分支操作类型
+            jump_op,          # [20]    跳转指令标志
+            store_type_bits,  # [23:22] 存储类型: 00=SB, 01=SH, 10=SW
+            UInt(1)(0),       # [21]    保留位
+            rd,               # [29:25] rd地址
+            immediate[11:0]   # [31:30] 立即数低12位
+        )
+        
+        
         with Condition(pipeline_regs[0].if_id_valid):
-            # 解析指令字段
-            opcode = instruction[6:0]          # bits 6:0
-            rd = instruction[11:7]             # bits 11:7
-            func3 = instruction[14:12]          # bits 14:12
-            rs1 = instruction[19:15]           # bits 19:15
-            rs2 = instruction[24:20]           # bits 24:20
-            funct7 = instruction[31:25]         # bits 31:25
-
-            # 提取立即数
-            immediate_i = instruction[31:20].sext(Int(32))     # I型立即数
-            immediate_s = concat(instruction[31:25], instruction[11:7]).sext(Int(32))  # S型立即数
-            immediate_b = concat(instruction[31:31], instruction[7:7], instruction[30:25], instruction[11:8], UInt(1)(0)).sext(Int(32))  # B型立即数
-            immediate_u = (instruction[31:12] << UInt(XLEN)(12)).sext(Int(32))  # U型立即数
-            immediate_j = concat(instruction[31:31], instruction[19:12], instruction[20:20], instruction[30:21], UInt(1)(0)).sext(Int(32))  # J型立即数
-            
-            # 控制信号解码
-            alu_op = UInt(5)(0)
-            mem_read = UInt(1)(0)
-            mem_write = UInt(1)(0)
-            reg_write = UInt(1)(0)
-            mem_to_reg = UInt(1)(0)
-            alu_src = UInt(2)(0)  # 00:寄存器, 01:立即数, 10:PC
-            branch_op = UInt(3)(0)
-            jump_op = UInt(1)(0)  # 跳转指令标志
-            immediate = UInt(XLEN)(0)  # 初始化立即数
-            
-            # 根据opcode设置控制信号
-            with Condition(opcode == UInt(7)(0b0110011)):  # R型指令
-                with Condition(funct7[5:5] == UInt(1)(1)):  # SUB or SRA
-                    with Condition(func3 == UInt(3)(0b000)):  # SUB
-                        alu_op = UInt(5)(0b00001)
-                    with Condition(func3 == UInt(3)(0b101)):  # SRA
-                        alu_op = UInt(5)(0b00110)
-                # ADD, AND, OR, XOR, SLT, SLTU, SLL, SRL
-                with Condition(funct7[5:5] == UInt(1)(0)):  # funct7[5] == 0
-                    with Condition(func3 == UInt(3)(0b000)):  # ADD
-                        alu_op = UInt(5)(0b00000)
-                    with Condition(func3 == UInt(3)(0b111)):  # AND
-                        alu_op = UInt(5)(0b01001)
-                    with Condition(func3 == UInt(3)(0b110)):  # OR
-                        alu_op = UInt(5)(0b01000)
-                    with Condition(func3 == UInt(3)(0b100)):  # XOR
-                        alu_op = UInt(5)(0b00100)
-                    with Condition(func3 == UInt(3)(0b010)):  # SLT
-                        alu_op = UInt(5)(0b00011)
-                    with Condition(func3 == UInt(3)(0b011)):  # SLTU
-                        alu_op = UInt(5)(0b00111)
-                    with Condition(func3 == UInt(3)(0b001)):  # SLL
-                        alu_op = UInt(5)(0b00010)
-                    with Condition(func3 == UInt(3)(0b101)):  # SRL
-                        alu_op = UInt(5)(0b00101)
-                # 其他操作...
-                reg_write = UInt(1)(1) & (rd != UInt(5)(0))  # x0寄存器不会写入
-                alu_src = UInt(2)(0)
-                
-            with Condition(opcode == UInt(7)(0b0010011)):  # I型指令
-                with Condition(func3 == UInt(3)(0b000)):  # ADDI
-                    alu_op = UInt(5)(0b00000)
-                with Condition(func3 == UInt(3)(0b111)):  # ANDI
-                    alu_op = UInt(5)(0b01001)
-                with Condition(func3 == UInt(3)(0b110)):  # ORI
-                    alu_op = UInt(5)(0b01000)
-                with Condition(func3 == UInt(3)(0b100)):  # XORI
-                    alu_op = UInt(5)(0b00100)
-                with Condition(func3 == UInt(3)(0b010)):  # SLTI
-                    alu_op = UInt(5)(0b00011)
-                with Condition(func3 == UInt(3)(0b011)):  # SLTIU
-                    alu_op = UInt(5)(0b00111)
-                with Condition(func3 == UInt(3)(0b001)):  # SLLI
-                    alu_op = UInt(5)(0b00010)
-                with Condition(func3 == UInt(3)(0b101)):  # SRLI or SRAI
-                    with Condition(funct7[5:5] == UInt(1)(1)):  # SRAI
-                        alu_op = UInt(5)(0b00110)
-                    with Condition(funct7[5:5] == UInt(1)(0)):  # SRLI
-                        alu_op = UInt(5)(0b00101)
-                # 其他操作...
-                reg_write = UInt(1)(1) & (rd != UInt(5)(0))  # x0寄存器不会写入
-                alu_src = UInt(2)(1)
-                immediate = immediate_i
-                
-            with Condition(opcode == UInt(7)(0b0000011)):
-                # LW加载指令
-                alu_op = UInt(5)(0b00000)  # ADD用于地址计算
-                mem_read = UInt(1)(1)
-                reg_write = UInt(1)(1) & (rd != UInt(5)(0))  # x0寄存器不会写入
-                mem_to_reg = UInt(1)(1)
-                alu_src = UInt(2)(1)
-                immediate = immediate_i
-                
-            store_type_bits = UInt(2)(0)
-            with Condition(opcode == UInt(7)(0b0100011)):  # 存储指令
-                with Condition(func3 == UInt(3)(0b010)):  # SW (Store Word)
-                    alu_op = UInt(5)(0b00000)  # ADD用于地址计算
-                    mem_write = UInt(1)(1)     # 存储使能
-                    alu_src = UInt(2)(1)
-                    immediate = immediate_s
-                    store_type_bits = UInt(2)(0b10)
-                with Condition(func3 == UInt(3)(0b000)):  # SB (Store Byte)
-                    alu_op = UInt(5)(0b00000)
-                    mem_write = UInt(1)(1)     # 存储使能
-                    alu_src = UInt(2)(1)
-                    immediate = immediate_s
-                    store_type_bits = UInt(2)(0b00)
-                with Condition(func3 == UInt(3)(0b001)):  # SH (Store Halfword)
-                    alu_op = UInt(5)(0b00000)
-                    mem_write = UInt(1)(1)     # 存储使能
-                    alu_src = UInt(2)(1)
-                    immediate = immediate_s
-                    store_type_bits = UInt(2)(0b01)
-
-            with Condition(opcode == UInt(7)(0b1100011)):  # 分支指令
-                immediate = immediate_b
-                with Condition(func3 == UInt(3)(0b000)):  # BEQ
-                    branch_op = UInt(3)(0b001)  # 修改为非0值，确保被识别为分支指令
-                with Condition(func3 == UInt(3)(0b001)):  # BNE
-                    branch_op = UInt(3)(0b010)
-                with Condition(func3 == UInt(3)(0b100)):  # BLT
-                    branch_op = UInt(3)(0b011)
-                with Condition(func3 == UInt(3)(0b101)):  # BGE
-                    branch_op = UInt(3)(0b100)
-                with Condition(func3 == UInt(3)(0b110)):  # BLTU
-                    branch_op = UInt(3)(0b101)
-                with Condition(func3 == UInt(3)(0b111)):  # BGEU
-                    branch_op = UInt(3)(0b110)
-                
-            
-            with Condition(opcode == UInt(7)(0b0110111)):  # LUI
-                reg_write = UInt(1)(1) & (rd != UInt(5)(0))  # x0寄存器不会写入
-                alu_src = UInt(2)(1)
-                immediate = immediate_u
-            
-            with Condition(opcode == UInt(7)(0b0010111)):  # AUIPC
-                reg_write = UInt(1)(1) & (rd != UInt(5)(0))  # x0寄存器不会写入
-                alu_src = UInt(2)(2)
-                immediate = immediate_u
-            
-            with Condition(opcode == UInt(7)(0b1101111)):  # JAL
-                reg_write = UInt(1)(1) & (rd != UInt(5)(0))  # x0寄存器不会写入
-                alu_src = UInt(2)(1)  # 使用立即数作为ALU输入
-                immediate = immediate_j
-                jump_op = UInt(1)(1)  # 设置跳转指令标志
-                # JAL指令需要特殊处理，在EX阶段会计算返回地址(PC+4)
-            
-            control_signals = concat(
-                alu_op,           # [4:0]   ALU操作码
-                mem_read,         # [5]     内存读
-                mem_write,        # [6]     内存写
-                reg_write,        # [7]     寄存器写
-                mem_to_reg,       # [8]     内存到寄存器
-                UInt(1)(0),       # [9]     保留位
-                alu_src,          # [10:9]  ALU输入选择
-                UInt(6)(0),       # [16:11] 保留位
-                branch_op,        # [19:17] 分支操作类型
-                jump_op,          # [20]    跳转指令标志
-                store_type_bits,  # [23:22] 存储类型: 00=SB, 01=SH, 10=SW
-                UInt(1)(0),       # [21]    保留位
-                rd,               # [29:25] rd地址
-                immediate[11:0]   # [31:30] 立即数低12位
-            )
-            
             pipeline_regs[0].id_ex_pc = if_id_pc_in
             
             log("ID: PC={}, Opcode={:07x}, RD={}, RS1={}, RS2={}",
                 if_id_pc_in, opcode, rd, rs1, rs2)
         
-        with Condition(~pipeline_regs[0].if_id_valid):
-            rs1 = UInt(XLEN)(0)
-            rs2 = UInt(XLEN)(0)
-            immediate = UInt(XLEN)(0)
-            control_signals = UInt(32)(0)
+        rs1 = (~pipeline_regs[0].if_id_valid).select(Bits(5)(0), rs1)
+        rs2 = (~pipeline_regs[0].if_id_valid).select(Bits(5)(0), rs2)
+        immediate = (~pipeline_regs[0].if_id_valid).select(UInt(XLEN)(0), immediate)
+        control_signals = (~pipeline_regs[0].if_id_valid).select(UInt(32)(0), control_signals)
 
         # execute_stage.async_called(
         #     pc_in=pipeline_regs[0].id_ex_pc,
