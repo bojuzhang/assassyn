@@ -16,33 +16,35 @@ REG_COUNT = 32  # 通用寄存器数量
 CONTROL_LEN = 42 # 控制信号长度
 
 
-PIPELINE_REGS = Record(
-    # IF/ID阶段寄存器
-    if_id_pc=UInt(XLEN),
-    if_id_instruction=UInt(XLEN),
-    if_id_valid=UInt(1),
-    
-    # ID/EX阶段寄存器
-    id_ex_pc=UInt(XLEN),
-    id_ex_control=UInt(CONTROL_LEN),       # 控制信号
-    id_ex_valid=UInt(1),
-    id_ex_rs1_idx=UInt(5),        # rs1寄存器索引
-    id_ex_rs2_idx=UInt(5),        # rs2寄存器索引
-    id_ex_immediate=UInt(XLEN),
-    
-    # EX/MEM阶段寄存器
-    ex_mem_pc=UInt(XLEN),
-    ex_mem_control=UInt(CONTROL_LEN),        # 控制信号
-    ex_mem_valid=UInt(1),
-    ex_mem_result=UInt(XLEN),
-    ex_mem_data=UInt(XLEN),
-    
-    # MEM/WB阶段寄存器
-    mem_wb_control=UInt(CONTROL_LEN),        # 控制信号
-    mem_wb_valid=UInt(1),
-    mem_wb_mem_data=UInt(XLEN),     # 内存读取的数据
-    mem_wb_ex_result=UInt(XLEN),     # EX阶段的结果
-)
+# Pipeline register array indices
+# IF/ID阶段寄存器
+IF_ID_PC = 0
+IF_ID_INSTRUCTION = 1
+IF_ID_VALID = 2
+
+# ID/EX阶段寄存器
+ID_EX_PC = 3
+ID_EX_CONTROL = 4
+ID_EX_VALID = 5
+ID_EX_RS1_IDX = 6
+ID_EX_RS2_IDX = 7
+ID_EX_IMMEDIATE = 8
+
+# EX/MEM阶段寄存器
+EX_MEM_PC = 9
+EX_MEM_CONTROL = 10
+EX_MEM_VALID = 11
+EX_MEM_RESULT = 12
+EX_MEM_DATA = 13
+
+# MEM/WB阶段寄存器
+MEM_WB_CONTROL = 14
+MEM_WB_VALID = 15
+MEM_WB_MEM_DATA = 16
+MEM_WB_EX_RESULT = 17
+
+# Total pipeline register count
+PIPELINE_REG_COUNT = 18
     
 
 # ==================== IF阶段：指令获取 ===================
@@ -58,16 +60,16 @@ class FetchStage(Module):
         word_addr = current_pc >> UInt(XLEN)(2)
         instruction = UInt(XLEN)(0)
 
-        log("IF_ID_VALID={}", pipeline_regs[0].if_id_valid)
+        log("IF_ID_VALID={}", pipeline_regs[IF_ID_VALID].bitcast(UInt(1)))
 
         instruction = stall[0].select(instruction, instruction_memory[word_addr])
         with Condition(~stall[0]):
-            pipeline_regs[0].if_id_pc = current_pc
+            pipeline_regs[IF_ID_PC] = current_pc.bitcast(Bits(CONTROL_LEN))
             log("IF: PC={:08x}, Instruction={:08x}", current_pc, instruction)
 
         decode_stage.async_called(
-            instruction_in=pipeline_regs[0].if_id_instruction,
-            if_id_pc_in=pipeline_regs[0].if_id_pc
+            instruction_in=pipeline_regs[IF_ID_INSTRUCTION].bitcast(UInt(XLEN)),
+            if_id_pc_in=pipeline_regs[IF_ID_PC].bitcast(UInt(XLEN))
         )
 
         fetch_signals = instruction.bitcast(Bits(XLEN))
@@ -86,7 +88,7 @@ class DecodeStage(Module):
     def build(self, pipeline_regs, reg_file, execute_stage):
         instruction, if_id_pc_in = self.pop_all_ports(True)
 
-        log("IF_ID_VALID={}", pipeline_regs[0].if_id_valid)
+        log("IF_ID_VALID={}", pipeline_regs[IF_ID_VALID].bitcast(UInt(1)))
         
         # 如果指令无效，直接返回，不更新ID/EX寄存器
         opcode = instruction[0:6]          # bits 6:0
@@ -191,23 +193,23 @@ class DecodeStage(Module):
         )
         
         
-        with Condition(pipeline_regs[0].if_id_valid):
-            pipeline_regs[0].id_ex_pc = if_id_pc_in
+        with Condition(pipeline_regs[IF_ID_VALID].bitcast(UInt(1))):
+            pipeline_regs[ID_EX_PC] = if_id_pc_in.bitcast(Bits(CONTROL_LEN))
             
             log("ID: PC={}, Opcode={:07x}, RD={}, RS1={}, RS2={}",
                 if_id_pc_in, opcode, rd, rs1, rs2)
         
-        rs1 = (~pipeline_regs[0].if_id_valid).select(Bits(5)(0), rs1)
-        rs2 = (~pipeline_regs[0].if_id_valid).select(Bits(5)(0), rs2)
-        immediate = (~pipeline_regs[0].if_id_valid).select(UInt(XLEN)(0), immediate)
-        control_signals = (~pipeline_regs[0].if_id_valid).select(Bits(CONTROL_LEN)(0), control_signals)
+        rs1 = (~pipeline_regs[IF_ID_VALID].bitcast(UInt(1))).select(Bits(5)(0), rs1)
+        rs2 = (~pipeline_regs[IF_ID_VALID].bitcast(UInt(1))).select(Bits(5)(0), rs2)
+        immediate = (~pipeline_regs[IF_ID_VALID].bitcast(UInt(1))).select(UInt(XLEN)(0), immediate)
+        control_signals = (~pipeline_regs[IF_ID_VALID].bitcast(UInt(1))).select(Bits(CONTROL_LEN)(0), control_signals)
 
         execute_stage.async_called(
-            pc_in=pipeline_regs[0].id_ex_pc,
-            rs1_idx_in=pipeline_regs[0].id_ex_rs1_idx,
-            rs2_idx_in=pipeline_regs[0].id_ex_rs2_idx,
-            immediate_in=pipeline_regs[0].id_ex_immediate,
-            control_in=pipeline_regs[0].id_ex_control,    # 控制信号
+            pc_in=pipeline_regs[ID_EX_PC].bitcast(UInt(XLEN)),
+            rs1_idx_in=pipeline_regs[ID_EX_RS1_IDX].bitcast(UInt(5)),
+            rs2_idx_in=pipeline_regs[ID_EX_RS2_IDX].bitcast(UInt(5)),
+            immediate_in=pipeline_regs[ID_EX_IMMEDIATE].bitcast(UInt(XLEN)),
+            control_in=pipeline_regs[ID_EX_CONTROL].bitcast(UInt(CONTROL_LEN)),    # 控制信号
         )
 
         decode_signals = concat(
@@ -317,20 +319,20 @@ class ExecuteStage(Module):
         pc_change = (is_branch | is_jump).select(UInt(1)(1), pc_change)
         
 
-        with Condition(pipeline_regs[0].id_ex_valid):   
-            pipeline_regs[0].ex_mem_pc = pc_in
-            pipeline_regs[0].ex_mem_control = control_in          # 传递控制信号
-            pipeline_regs[0].ex_mem_result = alu_result
-            pipeline_regs[0].ex_mem_data = rs2_data
+        with Condition(pipeline_regs[ID_EX_VALID].bitcast(UInt(1))):
+            pipeline_regs[EX_MEM_PC] = pc_in.bitcast(Bits(CONTROL_LEN))
+            pipeline_regs[EX_MEM_CONTROL] = control_in.bitcast(Bits(CONTROL_LEN))          # 传递控制信号
+            pipeline_regs[EX_MEM_RESULT] = alu_result.bitcast(Bits(CONTROL_LEN))
+            pipeline_regs[EX_MEM_DATA] = rs2_data.bitcast(Bits(CONTROL_LEN))
             
             log("EX: PC={}, ALU_OP={:05b}, Result={:08x}, PC_Change={}, Target_PC={:08x}",
                 pc_in, alu_op, alu_result, pc_change, target_pc)
         
         memory_stage.async_called(
-            pc_in=pipeline_regs[0].ex_mem_pc,
-            addr_in=pipeline_regs[0].ex_mem_result,  # 直接使用ex_mem_result作为内存地址
-            data_in=pipeline_regs[0].ex_mem_data,
-            control_in=pipeline_regs[0].ex_mem_control,    # 控制信号
+            pc_in=pipeline_regs[EX_MEM_PC].bitcast(UInt(XLEN)),
+            addr_in=pipeline_regs[EX_MEM_RESULT].bitcast(UInt(XLEN)),  # 直接使用ex_mem_result作为内存地址
+            data_in=pipeline_regs[EX_MEM_DATA].bitcast(UInt(XLEN)),
+            control_in=pipeline_regs[EX_MEM_CONTROL].bitcast(UInt(CONTROL_LEN)),    # 控制信号
         )
 
         execute_signals = concat(
@@ -368,11 +370,11 @@ class MemoryStage(Module):
         write_data = data_in
         data_sram = SRAM(width=XLEN, depth=1024, init_file=None)
 
-        with Condition(pipeline_regs[0].ex_mem_valid):
+        with Condition(pipeline_regs[EX_MEM_VALID].bitcast(UInt(1))):
             data_sram.build(we=mem_write, re=mem_read, addr=word_addr, wdata=write_data)
-            pipeline_regs[0].mem_wb_control = control_in          # 传递控制信号
-            pipeline_regs[0].mem_wb_mem_data = mem_data          # 内存读取的数据
-            pipeline_regs[0].mem_wb_ex_result = pipeline_regs[0].ex_mem_result     # EX/MEM阶段的结果
+            pipeline_regs[MEM_WB_CONTROL] = control_in.bitcast(Bits(CONTROL_LEN))          # 传递控制信号
+            pipeline_regs[MEM_WB_MEM_DATA] = mem_data.bitcast(Bits(CONTROL_LEN))          # 内存读取的数据
+            pipeline_regs[MEM_WB_EX_RESULT] = pipeline_regs[EX_MEM_RESULT].bitcast(Bits(CONTROL_LEN))     # EX/MEM阶段的结果
             
             log("MEM: PC={}, Addr={:08x}, Read={}, Write={}",
                 pc_in, addr_in, mem_read, mem_write)
@@ -380,9 +382,9 @@ class MemoryStage(Module):
         mem_data = mem_read.select(data_sram.dout[0], mem_data)
 
         writeback_stage.async_called(
-            mem_data_in=pipeline_regs[0].mem_wb_mem_data,  # 内存读取的数据
-            ex_result_in=pipeline_regs[0].mem_wb_ex_result, # EX阶段的结果
-            control_in=pipeline_regs[0].mem_wb_control,    # 控制信号
+            mem_data_in=pipeline_regs[MEM_WB_MEM_DATA].bitcast(UInt(XLEN)),  # 内存读取的数据
+            ex_result_in=pipeline_regs[MEM_WB_EX_RESULT].bitcast(UInt(XLEN)), # EX阶段的结果
+            control_in=pipeline_regs[MEM_WB_CONTROL].bitcast(UInt(CONTROL_LEN)),    # 控制信号
         )
 
 # ==================== WB阶段：写回 ===================
@@ -409,25 +411,25 @@ class WriteBackStage(Module):
         wb_data = reg_write.select(mem_to_reg.select(mem_data_in, ex_result_in), wb_data)
             
         # 如果指令无效，直接返回
-        with Condition(pipeline_regs[0].mem_wb_valid):
-            reg_file[wb_rd] <= wb_data
+        with Condition(pipeline_regs[MEM_WB_VALID].bitcast(UInt(1))):
+            reg_file[wb_rd] = wb_data
             log("WB: Write_Data={:08x}, RD={}, WE={}",
                 wb_data, control_in[25:29], reg_write)
 
-class HazardUnit(Downstream):
+class HazardUnit(Module):
     def __init__(self):
-        super().__init__()
+        super().__init__(ports={})
 
-    @downstream.combinational
+    @module.combinational
     def build(self, pc, stall, pipeline_regs, fetch_signals, decode_signals, execute_signals):
         # 解析各阶段指令的目标寄存器(rd)和写使能
-        control = pipeline_regs[0].id_ex_control
+        control = pipeline_regs[ID_EX_CONTROL].bitcast(UInt(CONTROL_LEN))
 
-        rd_mem = pipeline_regs[0].id_ex_control[25:29]
-        reg_write_mem = pipeline_regs[0].id_ex_control[7:7]
+        rd_mem = pipeline_regs[ID_EX_CONTROL].bitcast(UInt(CONTROL_LEN))[25:29]
+        reg_write_mem = pipeline_regs[ID_EX_CONTROL].bitcast(UInt(CONTROL_LEN))[7:7]
         
-        rd_wb = pipeline_regs[0].ex_mem_control[25:29]
-        reg_write_wb = pipeline_regs[0].ex_mem_control[7:7]
+        rd_wb = pipeline_regs[EX_MEM_CONTROL].bitcast(UInt(CONTROL_LEN))[25:29]
+        reg_write_wb = pipeline_regs[EX_MEM_CONTROL].bitcast(UInt(CONTROL_LEN))[7:7]
         
         # 初始化数据冒险信号
         data_hazard_ex = UInt(1)(0)  # 与EX阶段指令的数据冒险
@@ -436,15 +438,16 @@ class HazardUnit(Downstream):
         needs_rs1 = (control[0:4] != UInt(5)(0)) | (control[17:19] != UInt(3)(0)) | (control[20:20] == UInt(1)(1))  # ALU操作、分支操作或跳转操作需要rs1
         needs_rs2 = (control[9:10] == UInt(2)(0)) & ((control[0:4] != UInt(5)(0)) | (control[17:19] != UInt(3)(0)))  # 只有当ALU源是寄存器且是ALU或分支操作时才需要rs2
         
-        data_hazard_ex = (reg_write_mem & ((needs_rs1 & (pipeline_regs[0].id_ex_rs1_idx == rd_mem)) | (needs_rs2 & (pipeline_regs[0].id_ex_rs2_idx == rd_mem)))).select(UInt(1)(1), data_hazard_ex)
+        data_hazard_ex = (reg_write_mem & ((needs_rs1 & (pipeline_regs[ID_EX_RS1_IDX].bitcast(UInt(5)) == rd_mem)) | (needs_rs2 & (pipeline_regs[ID_EX_RS2_IDX].bitcast(UInt(5)) == rd_mem)))).select(UInt(1)(1), data_hazard_ex)
 
-        data_hazard_wb = (reg_write_wb & ((needs_rs1 & (pipeline_regs[0].id_ex_rs1_idx == rd_wb)) | (needs_rs2 & (pipeline_regs[0].id_ex_rs2_idx == rd_wb)))).select(UInt(1)(1), data_hazard_wb)
+        data_hazard_wb = (reg_write_wb & ((needs_rs1 & (pipeline_regs[ID_EX_RS1_IDX].bitcast(UInt(5)) == rd_wb)) | (needs_rs2 & (pipeline_regs[ID_EX_RS2_IDX].bitcast(UInt(5)) == rd_wb)))).select(UInt(1)(1), data_hazard_wb)
         
         # 综合数据冒险信号
         data_hazard = data_hazard_ex | data_hazard_wb
-        pipeline_regs[0].id_ex_valid <= ~data_hazard 
-        pipeline_regs[0].if_id_valid <= ~data_hazard 
-        pipeline_regs[0].ex_mem_valid = pipeline_regs[0].mem_wb_valid = UInt(1)(1)  # EX/MEM和MEM/WB阶段始终有效
+        pipeline_regs[ID_EX_VALID] = (~data_hazard).bitcast(Bits(CONTROL_LEN))
+        pipeline_regs[IF_ID_VALID] = (~data_hazard).bitcast(Bits(CONTROL_LEN))
+        pipeline_regs[EX_MEM_VALID] = Bits(CONTROL_LEN)(1)  # ID/EX和EX/MEM阶段始终有效
+        pipeline_regs[MEM_WB_VALID] = Bits(CONTROL_LEN)(1)  # EX/MEM和MEM/WB阶段始终有效
         stall[0] = data_hazard
         nop_control = UInt(CONTROL_LEN)(0) # NOP控制信号，全0表示无操作
 
@@ -461,14 +464,14 @@ class HazardUnit(Downstream):
         rs2 = decode_signals[CONTROL_LEN + 5:CONTROL_LEN + 5 + 5 - 1].bitcast(UInt(5))
         control_in = decode_signals[0:CONTROL_LEN - 1].bitcast(UInt(CONTROL_LEN))
         pc[0] = pc_change.select(target_pc, pc[0] + UInt(XLEN)(4))
-        pipeline_regs[0].if_id_instruction = pc_change.select(UInt(XLEN)(0x00000013), instruction)  # NOP指令
-        pipeline_regs[0].id_ex_control = pc_change.select(nop_control, control_in)
-        pipeline_regs[0].id_ex_immediate = pc_change.select(UInt(XLEN)(0), immediate)
-        pipeline_regs[0].id_ex_rs1_idx = pc_change.select(UInt(5)(0), rs1)
-        pipeline_regs[0].id_ex_rs2_idx = pc_change.select(UInt(5)(0), rs2)
+        pipeline_regs[IF_ID_INSTRUCTION] = pc_change.select(UInt(XLEN)(0x00000013), instruction).bitcast(Bits(CONTROL_LEN))  # NOP指令
+        pipeline_regs[ID_EX_CONTROL] = pc_change.select(nop_control, control_in).bitcast(Bits(CONTROL_LEN))
+        pipeline_regs[ID_EX_IMMEDIATE] = pc_change.select(UInt(XLEN)(0), immediate).bitcast(Bits(CONTROL_LEN))
+        pipeline_regs[ID_EX_RS1_IDX] = pc_change.select(UInt(5)(0), rs1).bitcast(Bits(CONTROL_LEN))
+        pipeline_regs[ID_EX_RS2_IDX] = pc_change.select(UInt(5)(0), rs2).bitcast(Bits(CONTROL_LEN))
 
-        log("Hazard Unit: Data_Hazard={}, PC_Change={}, Target_PC={:08x}, IF_ID_VALID={}, ID_EX_VALID={}", 
-            data_hazard, pc_change, target_pc, pipeline_regs[0].if_id_valid, pipeline_regs[0].id_ex_valid)
+        log("Hazard Unit: Data_Hazard={}, PC_Change={}, Target_PC={:08x}, IF_ID_VALID={}, ID_EX_VALID={}",
+            data_hazard, pc_change, target_pc, pipeline_regs[IF_ID_VALID].bitcast(UInt(1)), pipeline_regs[ID_EX_VALID].bitcast(UInt(1)))
 
 # ==================== 顶层CPU模块 ===================
 class Driver(Module):
@@ -477,8 +480,9 @@ class Driver(Module):
         super().__init__(ports={})
 
     @module.combinational
-    def build(self, pipeline_regs, fetch_stage):
+    def build(self, pipeline_regs, fetch_stage, hazard_unit):
         fetch_stage.async_called()
+        hazard_unit.async_called()
         
 def init_memory(self, program_file="test_program.txt"):
     """初始化内存内容 - 从指定文件加载程序到指令寄存器"""
@@ -512,25 +516,8 @@ def build_cpu(program_file="test_program.txt"):
     """构建RV32I CPU系统"""
     sys = SysBuilder('rv32i_cpu')
     with sys:
-        pipeline_regs = RegArray(PIPELINE_REGS, 1)
-        # pipeline_regs[0].if_id_pc = UInt(XLEN)(0)
-        # pipeline_regs[0].if_id_instruction = UInt(XLEN)(0)
-        # pipeline_regs[0].if_id_valid = UInt(1)(0)
-        # pipeline_regs[0].id_ex_pc = UInt(XLEN)(0)
-        # pipeline_regs[0].id_ex_control = UInt(CONTROL_LEN)(0)
-        # pipeline_regs[0].id_ex_valid = UInt(1)(0)
-        # pipeline_regs[0].id_ex_rs1_idx = UInt(5)(0)
-        # pipeline_regs[0].id_ex_rs2_idx = UInt(5)(0)
-        # pipeline_regs[0].id_ex_immediate = UInt(XLEN)(0)
-        # pipeline_regs[0].ex_mem_pc = UInt(XLEN)(0)
-        # pipeline_regs[0].ex_mem_control = UInt(CONTROL_LEN)(0)
-        # pipeline_regs[0].ex_mem_valid = UInt(1)(0)
-        # pipeline_regs[0].ex_mem_result = UInt(XLEN)(0)
-        # pipeline_regs[0].ex_mem_data = UInt(XLEN)(0)
-        # pipeline_regs[0].mem_wb_control = UInt(CONTROL_LEN)(0)
-        # pipeline_regs[0].mem_wb_valid = UInt(1)(0)
-        # pipeline_regs[0].mem_wb_mem_data = UInt(XLEN)(0)
-        # pipeline_regs[0].mem_wb_ex_result = UInt(XLEN)(0)
+        # Create pipeline registers as a pure array with proper bit width
+        pipeline_regs = RegArray(Bits(CONTROL_LEN), PIPELINE_REG_COUNT, initializer=[0]*PIPELINE_REG_COUNT)
 
         # 创建指令内存
         test_program = init_memory(program_file)
@@ -559,7 +546,7 @@ def build_cpu(program_file="test_program.txt"):
         hazard_unit.build(pc, stall, pipeline_regs, fetch_signals, decode_signals, execute_signals)
         
         # 构建Driver模块，处理PC更新
-        driver.build(pipeline_regs, fetch_stage)
+        driver.build(pipeline_regs, fetch_stage, hazard_unit)
     
     return sys
 

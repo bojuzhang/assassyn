@@ -15,11 +15,11 @@ class Driver(Module):
     @module.combinational
     def build(self):
         # Create a simple counter
-        counter = RegArray(Record(value=UInt(8)), 1)
-        counter[0].value = counter[0].value + UInt(8)(1)
+        counter = RegArray(Record(value=RegArray(UInt(8), 1)), 1)
+        counter[0].value[0] = counter[0].value[0] + UInt(8)(1)
         
         # Log the current value
-        log('Current value: {}', counter[0].value)
+        log('Current value: {}', counter[0].value[0])
 
 def main():
     print("=== Simple Assassyn Program ===")
