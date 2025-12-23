@@ -15,38 +15,6 @@ XLEN = 32  # RISC-V XLEN
 REG_COUNT = 32  # 通用寄存器数量
 CONTROL_LEN = 42 # 控制信号长度
 
-
-# Pipeline register array indices
-# IF/ID阶段寄存器
-IF_ID_PC = 0
-IF_ID_INSTRUCTION = 1
-IF_ID_VALID = 2
-
-# ID/EX阶段寄存器
-ID_EX_PC = 3
-ID_EX_CONTROL = 4
-ID_EX_VALID = 5
-ID_EX_RS1_IDX = 6
-ID_EX_RS2_IDX = 7
-ID_EX_IMMEDIATE = 8
-
-# EX/MEM阶段寄存器
-EX_MEM_PC = 9
-EX_MEM_CONTROL = 10
-EX_MEM_VALID = 11
-EX_MEM_RESULT = 12
-EX_MEM_DATA = 13
-
-# MEM/WB阶段寄存器
-MEM_WB_CONTROL = 14
-MEM_WB_VALID = 15
-MEM_WB_MEM_DATA = 16
-MEM_WB_EX_RESULT = 17
-
-# Total pipeline register count
-PIPELINE_REG_COUNT = 18
-    
-
 # ==================== IF阶段：指令获取 ===================
 class FetchStage(Module):
     """指令获取阶段(IF)"""
@@ -55,21 +23,23 @@ class FetchStage(Module):
         })
     
     @module.combinational
-    def build(self, pc, stall, pipeline_regs, instruction_memory, decode_stage):
+    def build(self, pc, stall, if_id_pc, if_id_instruction, if_id_valid, instruction_memory, decode_stage):
         current_pc = pc[0]
         word_addr = current_pc >> UInt(XLEN)(2)
         instruction = UInt(XLEN)(0)
 
-        log("IF_ID_VALID={}", pipeline_regs[IF_ID_VALID].bitcast(UInt(1)))
+        log("IF_ID_VALID={}", if_id_valid[0])
 
         instruction = stall[0].select(instruction, instruction_memory[word_addr])
         with Condition(~stall[0]):
-            pipeline_regs[IF_ID_PC] = current_pc.bitcast(Bits(CONTROL_LEN))
+            if_id_pc[0] = current_pc
+            if_id_instruction[0] = instruction
+            if_id_valid[0] = UInt(1)(1)
             log("IF: PC={:08x}, Instruction={:08x}", current_pc, instruction)
 
         decode_stage.async_called(
-            instruction_in=pipeline_regs[IF_ID_INSTRUCTION].bitcast(UInt(XLEN)),
-            if_id_pc_in=pipeline_regs[IF_ID_PC].bitcast(UInt(XLEN))
+            instruction_in=instruction,
+            if_id_pc_in=current_pc,
         )
 
         fetch_signals = instruction.bitcast(Bits(XLEN))
@@ -85,10 +55,10 @@ class DecodeStage(Module):
         })
     
     @module.combinational
-    def build(self, pipeline_regs, reg_file, execute_stage):
+    def build(self, if_id_valid, if_id_pc, id_ex_pc, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, reg_file, execute_stage):
         instruction, if_id_pc_in = self.pop_all_ports(True)
 
-        log("IF_ID_VALID={}", pipeline_regs[IF_ID_VALID].bitcast(UInt(1)))
+        log("IF_ID_VALID={}", if_id_valid[0])
         
         # 如果指令无效，直接返回，不更新ID/EX寄存器
         opcode = instruction[0:6]          # bits 6:0
@@ -193,30 +163,35 @@ class DecodeStage(Module):
         )
         
         
-        with Condition(pipeline_regs[IF_ID_VALID].bitcast(UInt(1))):
-            pipeline_regs[ID_EX_PC] = if_id_pc_in.bitcast(Bits(CONTROL_LEN))
+        with Condition(if_id_valid[0]):
+            id_ex_pc[0] = if_id_pc_in
+            id_ex_control[0] = control_signals
+            id_ex_valid[0] = UInt(1)(1)
+            id_ex_rs1_idx[0] = rs1
+            id_ex_rs2_idx[0] = rs2
+            id_ex_immediate[0] = immediate
             
-            log("ID: PC={}, Opcode={:07x}, RD={}, RS1={}, RS2={}",
-                if_id_pc_in, opcode, rd, rs1, rs2)
+            log("ID: PC={}, Opcode={:07x}, RD={}, RS1={}, RS2={}, Immediate={}, Alu_op={}, Branch_op={}, Jump_op={}, Alu_src={}",
+                if_id_pc_in, opcode, rd, rs1, rs2, immediate, alu_op, branch_op, jump_op, alu_src)
         
-        rs1 = (~pipeline_regs[IF_ID_VALID].bitcast(UInt(1))).select(Bits(5)(0), rs1)
-        rs2 = (~pipeline_regs[IF_ID_VALID].bitcast(UInt(1))).select(Bits(5)(0), rs2)
-        immediate = (~pipeline_regs[IF_ID_VALID].bitcast(UInt(1))).select(UInt(XLEN)(0), immediate)
-        control_signals = (~pipeline_regs[IF_ID_VALID].bitcast(UInt(1))).select(Bits(CONTROL_LEN)(0), control_signals)
+        rs1 = (~if_id_valid[0]).select(Bits(5)(0), rs1)
+        rs2 = (~if_id_valid[0]).select(Bits(5)(0), rs2)
+        immediate = (~if_id_valid[0]).select(UInt(XLEN)(0), immediate)
+        control_signals = (~if_id_valid[0]).select(Bits(CONTROL_LEN)(0), control_signals)
 
         execute_stage.async_called(
-            pc_in=pipeline_regs[ID_EX_PC].bitcast(UInt(XLEN)),
-            rs1_idx_in=pipeline_regs[ID_EX_RS1_IDX].bitcast(UInt(5)),
-            rs2_idx_in=pipeline_regs[ID_EX_RS2_IDX].bitcast(UInt(5)),
-            immediate_in=pipeline_regs[ID_EX_IMMEDIATE].bitcast(UInt(XLEN)),
-            control_in=pipeline_regs[ID_EX_CONTROL].bitcast(UInt(CONTROL_LEN)),    # 控制信号
+            pc_in=if_id_pc_in,
+            rs1_idx_in=rs1,
+            rs2_idx_in=rs2,
+            immediate_in=immediate,
+            control_in=control_signals.bitcast(UInt(CONTROL_LEN)),    # 控制信号
         )
 
         decode_signals = concat(
-            control_signals.bitcast(UInt(CONTROL_LEN)),
-            rs1,
+            immediate,
             rs2,
-            immediate
+            rs1,
+            control_signals.bitcast(UInt(CONTROL_LEN)),
         )
         return decode_signals
 
@@ -275,7 +250,7 @@ class ExecuteStage(Module):
         return taken
 
     @module.combinational
-    def build(self, pipeline_regs, reg_file, memory_stage):
+    def build(self, id_ex_valid, ex_mem_pc, ex_mem_control, ex_mem_valid, ex_mem_result, ex_mem_data, reg_file, memory_stage):
         pc_in, rs1_idx, rs2_idx, immediate_in, control_in = self.pop_all_ports(True)
         
         # 直接从寄存器文件读取rs1和rs2的值
@@ -319,25 +294,26 @@ class ExecuteStage(Module):
         pc_change = (is_branch | is_jump).select(UInt(1)(1), pc_change)
         
 
-        with Condition(pipeline_regs[ID_EX_VALID].bitcast(UInt(1))):
-            pipeline_regs[EX_MEM_PC] = pc_in.bitcast(Bits(CONTROL_LEN))
-            pipeline_regs[EX_MEM_CONTROL] = control_in.bitcast(Bits(CONTROL_LEN))          # 传递控制信号
-            pipeline_regs[EX_MEM_RESULT] = alu_result.bitcast(Bits(CONTROL_LEN))
-            pipeline_regs[EX_MEM_DATA] = rs2_data.bitcast(Bits(CONTROL_LEN))
+        with Condition(id_ex_valid[0]):
+            ex_mem_pc[0] = pc_in
+            ex_mem_control[0] = control_in          # 传递控制信号
+            ex_mem_valid[0] = UInt(1)(1)
+            ex_mem_result[0] = alu_result
+            ex_mem_data[0] = rs2_data
             
             log("EX: PC={}, ALU_OP={:05b}, Result={:08x}, PC_Change={}, Target_PC={:08x}",
                 pc_in, alu_op, alu_result, pc_change, target_pc)
         
         memory_stage.async_called(
-            pc_in=pipeline_regs[EX_MEM_PC].bitcast(UInt(XLEN)),
-            addr_in=pipeline_regs[EX_MEM_RESULT].bitcast(UInt(XLEN)),  # 直接使用ex_mem_result作为内存地址
-            data_in=pipeline_regs[EX_MEM_DATA].bitcast(UInt(XLEN)),
-            control_in=pipeline_regs[EX_MEM_CONTROL].bitcast(UInt(CONTROL_LEN)),    # 控制信号
+            pc_in=pc_in,
+            addr_in=alu_result,  # 直接使用ex_mem_result作为内存地址
+            data_in=rs2_data,
+            control_in=control_in,    # 控制信号
         )
 
         execute_signals = concat(
+            target_pc,       # [31:1]  目标PC
             pc_change,      # [0]     PC变化标志
-            target_pc       # [31:1]  目标PC
         )
 
         return execute_signals
@@ -354,7 +330,7 @@ class MemoryStage(Module):
         })
     
     @module.combinational
-    def build(self, pipeline_regs, writeback_stage):
+    def build(self, ex_mem_valid, ex_mem_result, mem_wb_control, mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, writeback_stage, data_sram):
         pc_in, addr_in, data_in, control_in = self.pop_all_ports(True)
         
         # 如果指令无效，直接返回，不更新MEM/WB寄存器
@@ -368,23 +344,24 @@ class MemoryStage(Module):
         
         word_addr = addr_in >> UInt(XLEN)(2)
         write_data = data_in
-        data_sram = SRAM(width=XLEN, depth=1024, init_file=None)
 
-        with Condition(pipeline_regs[EX_MEM_VALID].bitcast(UInt(1))):
-            data_sram.build(we=mem_write, re=mem_read, addr=word_addr, wdata=write_data)
-            pipeline_regs[MEM_WB_CONTROL] = control_in.bitcast(Bits(CONTROL_LEN))          # 传递控制信号
-            pipeline_regs[MEM_WB_MEM_DATA] = mem_data.bitcast(Bits(CONTROL_LEN))          # 内存读取的数据
-            pipeline_regs[MEM_WB_EX_RESULT] = pipeline_regs[EX_MEM_RESULT].bitcast(Bits(CONTROL_LEN))     # EX/MEM阶段的结果
+        with Condition(ex_mem_valid[0]):
+            with Condition(mem_read | mem_write):
+                data_sram.build(we=UInt(1)(0), re=UInt(1)(0), addr=word_addr, wdata=write_data)
+                mem_wb_mem_data[0] = data_sram.dout[0]          # 内存读取的数据
+            mem_wb_control[0] = control_in          # 传递控制信号
+            mem_wb_valid[0] = UInt(1)(1)
+            mem_wb_ex_result[0] = ex_mem_result[0]     # EX/MEM阶段的结果
             
             log("MEM: PC={}, Addr={:08x}, Read={}, Write={}",
                 pc_in, addr_in, mem_read, mem_write)
-        
-        mem_data = mem_read.select(data_sram.dout[0], mem_data)
+
+        mem_data = mem_read.select(mem_wb_mem_data[0], mem_data)
 
         writeback_stage.async_called(
-            mem_data_in=pipeline_regs[MEM_WB_MEM_DATA].bitcast(UInt(XLEN)),  # 内存读取的数据
-            ex_result_in=pipeline_regs[MEM_WB_EX_RESULT].bitcast(UInt(XLEN)), # EX阶段的结果
-            control_in=pipeline_regs[MEM_WB_CONTROL].bitcast(UInt(CONTROL_LEN)),    # 控制信号
+            mem_data_in=mem_data,  # 内存读取的数据
+            ex_result_in=ex_mem_result[0], # EX阶段的结果
+            control_in=control_in,    # 控制信号
         )
 
 # ==================== WB阶段：写回 ===================
@@ -398,7 +375,7 @@ class WriteBackStage(Module):
         })
     
     @module.combinational
-    def build(self, pipeline_regs, reg_file):
+    def build(self, mem_wb_valid, reg_file):
         mem_data_in, ex_result_in, control_in = self.pop_all_ports(True)
         
             # 解析控制信号
@@ -411,25 +388,25 @@ class WriteBackStage(Module):
         wb_data = reg_write.select(mem_to_reg.select(mem_data_in, ex_result_in), wb_data)
             
         # 如果指令无效，直接返回
-        with Condition(pipeline_regs[MEM_WB_VALID].bitcast(UInt(1))):
+        with Condition(mem_wb_valid[0]):
             reg_file[wb_rd] = wb_data
             log("WB: Write_Data={:08x}, RD={}, WE={}",
                 wb_data, control_in[25:29], reg_write)
 
-class HazardUnit(Module):
+class HazardUnit(Downstream):
     def __init__(self):
-        super().__init__(ports={})
+        super().__init__()
 
-    @module.combinational
-    def build(self, pc, stall, pipeline_regs, fetch_signals, decode_signals, execute_signals):
+    @downstream.combinational
+    def build(self, pc, stall, if_id_valid, if_id_instruction, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, ex_mem_control, ex_mem_valid, mem_wb_control, mem_wb_valid, fetch_signals, decode_signals, execute_signals):
         # 解析各阶段指令的目标寄存器(rd)和写使能
-        control = pipeline_regs[ID_EX_CONTROL].bitcast(UInt(CONTROL_LEN))
+        control = id_ex_control[0]
 
-        rd_mem = pipeline_regs[ID_EX_CONTROL].bitcast(UInt(CONTROL_LEN))[25:29]
-        reg_write_mem = pipeline_regs[ID_EX_CONTROL].bitcast(UInt(CONTROL_LEN))[7:7]
+        rd_mem = id_ex_control[0][25:29]
+        reg_write_mem = id_ex_control[0][7:7]
         
-        rd_wb = pipeline_regs[EX_MEM_CONTROL].bitcast(UInt(CONTROL_LEN))[25:29]
-        reg_write_wb = pipeline_regs[EX_MEM_CONTROL].bitcast(UInt(CONTROL_LEN))[7:7]
+        rd_wb = ex_mem_control[0][25:29]
+        reg_write_wb = ex_mem_control[0][7:7]
         
         # 初始化数据冒险信号
         data_hazard_ex = UInt(1)(0)  # 与EX阶段指令的数据冒险
@@ -438,16 +415,16 @@ class HazardUnit(Module):
         needs_rs1 = (control[0:4] != UInt(5)(0)) | (control[17:19] != UInt(3)(0)) | (control[20:20] == UInt(1)(1))  # ALU操作、分支操作或跳转操作需要rs1
         needs_rs2 = (control[9:10] == UInt(2)(0)) & ((control[0:4] != UInt(5)(0)) | (control[17:19] != UInt(3)(0)))  # 只有当ALU源是寄存器且是ALU或分支操作时才需要rs2
         
-        data_hazard_ex = (reg_write_mem & ((needs_rs1 & (pipeline_regs[ID_EX_RS1_IDX].bitcast(UInt(5)) == rd_mem)) | (needs_rs2 & (pipeline_regs[ID_EX_RS2_IDX].bitcast(UInt(5)) == rd_mem)))).select(UInt(1)(1), data_hazard_ex)
+        data_hazard_ex = (reg_write_mem & ((needs_rs1 & (id_ex_rs1_idx[0] == rd_mem)) | (needs_rs2 & (id_ex_rs2_idx[0] == rd_mem)))).select(UInt(1)(1), data_hazard_ex)
 
-        data_hazard_wb = (reg_write_wb & ((needs_rs1 & (pipeline_regs[ID_EX_RS1_IDX].bitcast(UInt(5)) == rd_wb)) | (needs_rs2 & (pipeline_regs[ID_EX_RS2_IDX].bitcast(UInt(5)) == rd_wb)))).select(UInt(1)(1), data_hazard_wb)
+        data_hazard_wb = (reg_write_wb & ((needs_rs1 & (id_ex_rs1_idx[0] == rd_wb)) | (needs_rs2 & (id_ex_rs2_idx[0] == rd_wb)))).select(UInt(1)(1), data_hazard_wb)
         
         # 综合数据冒险信号
         data_hazard = data_hazard_ex | data_hazard_wb
-        pipeline_regs[ID_EX_VALID] = (~data_hazard).bitcast(Bits(CONTROL_LEN))
-        pipeline_regs[IF_ID_VALID] = (~data_hazard).bitcast(Bits(CONTROL_LEN))
-        pipeline_regs[EX_MEM_VALID] = Bits(CONTROL_LEN)(1)  # ID/EX和EX/MEM阶段始终有效
-        pipeline_regs[MEM_WB_VALID] = Bits(CONTROL_LEN)(1)  # EX/MEM和MEM/WB阶段始终有效
+        id_ex_valid[0] = (~data_hazard)
+        if_id_valid[0] = (~data_hazard)
+        ex_mem_valid[0] = UInt(1)(1)  # ID/EX和EX/MEM阶段始终有效
+        mem_wb_valid[0] = UInt(1)(1)  # EX/MEM和MEM/WB阶段始终有效
         stall[0] = data_hazard
         nop_control = UInt(CONTROL_LEN)(0) # NOP控制信号，全0表示无操作
 
@@ -464,14 +441,15 @@ class HazardUnit(Module):
         rs2 = decode_signals[CONTROL_LEN + 5:CONTROL_LEN + 5 + 5 - 1].bitcast(UInt(5))
         control_in = decode_signals[0:CONTROL_LEN - 1].bitcast(UInt(CONTROL_LEN))
         pc[0] = pc_change.select(target_pc, pc[0] + UInt(XLEN)(4))
-        pipeline_regs[IF_ID_INSTRUCTION] = pc_change.select(UInt(XLEN)(0x00000013), instruction).bitcast(Bits(CONTROL_LEN))  # NOP指令
-        pipeline_regs[ID_EX_CONTROL] = pc_change.select(nop_control, control_in).bitcast(Bits(CONTROL_LEN))
-        pipeline_regs[ID_EX_IMMEDIATE] = pc_change.select(UInt(XLEN)(0), immediate).bitcast(Bits(CONTROL_LEN))
-        pipeline_regs[ID_EX_RS1_IDX] = pc_change.select(UInt(5)(0), rs1).bitcast(Bits(CONTROL_LEN))
-        pipeline_regs[ID_EX_RS2_IDX] = pc_change.select(UInt(5)(0), rs2).bitcast(Bits(CONTROL_LEN))
+        if_id_instruction[0] = pc_change.select(UInt(XLEN)(0x00000013), instruction)  # NOP指令
+        id_ex_control[0] = pc_change.select(nop_control, control_in)
+        id_ex_immediate[0] = pc_change.select(UInt(XLEN)(0), immediate)
+        id_ex_rs1_idx[0] = pc_change.select(UInt(5)(0), rs1)
+        id_ex_rs2_idx[0] = pc_change.select(UInt(5)(0), rs2)
 
+        log("Execute_signals={}", execute_signals)
         log("Hazard Unit: Data_Hazard={}, PC_Change={}, Target_PC={:08x}, IF_ID_VALID={}, ID_EX_VALID={}",
-            data_hazard, pc_change, target_pc, pipeline_regs[IF_ID_VALID].bitcast(UInt(1)), pipeline_regs[ID_EX_VALID].bitcast(UInt(1)))
+            data_hazard, pc_change, target_pc, if_id_valid[0], id_ex_valid[0])
 
 # ==================== 顶层CPU模块 ===================
 class Driver(Module):
@@ -480,9 +458,8 @@ class Driver(Module):
         super().__init__(ports={})
 
     @module.combinational
-    def build(self, pipeline_regs, fetch_stage, hazard_unit):
+    def build(self, fetch_stage):
         fetch_stage.async_called()
-        hazard_unit.async_called()
         
 def init_memory(self, program_file="test_program.txt"):
     """初始化内存内容 - 从指定文件加载程序到指令寄存器"""
@@ -516,8 +493,33 @@ def build_cpu(program_file="test_program.txt"):
     """构建RV32I CPU系统"""
     sys = SysBuilder('rv32i_cpu')
     with sys:
-        # Create pipeline registers as a pure array with proper bit width
-        pipeline_regs = RegArray(Bits(CONTROL_LEN), PIPELINE_REG_COUNT, initializer=[0]*PIPELINE_REG_COUNT)
+        # 创建单独的流水线寄存器，每个寄存器使用适合的宽度
+        
+        # IF/ID阶段寄存器
+        if_id_pc = RegArray(UInt(XLEN), 1, initializer=[0])           # PC (32位)
+        if_id_instruction = RegArray(UInt(XLEN), 1, initializer=[0])  # 指令 (32位)
+        if_id_valid = RegArray(UInt(1), 1, initializer=[0])            # 有效标志 (1位)
+
+        # ID/EX阶段寄存器
+        id_ex_pc = RegArray(UInt(XLEN), 1, initializer=[0])           # PC (32位)
+        id_ex_control = RegArray(UInt(CONTROL_LEN), 1, initializer=[0])  # 控制信号 (42位)
+        id_ex_valid = RegArray(UInt(1), 1, initializer=[0])            # 有效标志 (1位)
+        id_ex_rs1_idx = RegArray(UInt(5), 1, initializer=[0])         # rs1索引 (5位)
+        id_ex_rs2_idx = RegArray(UInt(5), 1, initializer=[0])         # rs2索引 (5位)
+        id_ex_immediate = RegArray(UInt(XLEN), 1, initializer=[0])    # 立即数 (32位)
+
+        # EX/MEM阶段寄存器
+        ex_mem_pc = RegArray(UInt(XLEN), 1, initializer=[0])           # PC (32位)
+        ex_mem_control = RegArray(UInt(CONTROL_LEN), 1, initializer=[0])  # 控制信号 (42位)
+        ex_mem_valid = RegArray(UInt(1), 1, initializer=[0])            # 有效标志 (1位)
+        ex_mem_result = RegArray(UInt(XLEN), 1, initializer=[0])       # ALU结果 (32位)
+        ex_mem_data = RegArray(UInt(XLEN), 1, initializer=[0])          # 数据 (32位)
+
+        # MEM/WB阶段寄存器
+        mem_wb_control = RegArray(UInt(CONTROL_LEN), 1, initializer=[0])  # 控制信号 (42位)
+        mem_wb_valid = RegArray(UInt(1), 1, initializer=[0])            # 有效标志 (1位)
+        mem_wb_mem_data = RegArray(UInt(XLEN), 1, initializer=[0])     # 内存数据 (32位)
+        mem_wb_ex_result = RegArray(UInt(XLEN), 1, initializer=[0])     # EX阶段结果 (32位)
 
         # 创建指令内存
         test_program = init_memory(program_file)
@@ -529,6 +531,7 @@ def build_cpu(program_file="test_program.txt"):
         pc = RegArray(UInt(XLEN), 1, initializer=[0])
         stall = RegArray(UInt(1), 1, initializer=[0])
         
+        data_sram = SRAM(width=XLEN, depth=1024, init_file=None)
         hazard_unit = HazardUnit()
         fetch_stage = FetchStage()
         decode_stage = DecodeStage()
@@ -538,15 +541,15 @@ def build_cpu(program_file="test_program.txt"):
         driver = Driver()
 
         # 按照流水线顺序构建模块
-        writeback_stage.build(pipeline_regs, reg_file)
-        memory_stage.build(pipeline_regs, writeback_stage)
-        execute_signals = execute_stage.build(pipeline_regs, reg_file, memory_stage)
-        decode_signals = decode_stage.build(pipeline_regs, reg_file, execute_stage)
-        fetch_signals = fetch_stage.build(pc, stall, pipeline_regs, instruction_memory, decode_stage)
-        hazard_unit.build(pc, stall, pipeline_regs, fetch_signals, decode_signals, execute_signals)
+        writeback_stage.build(mem_wb_valid, reg_file)
+        memory_stage.build(ex_mem_valid, ex_mem_result, mem_wb_control, mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, writeback_stage, data_sram)
+        execute_signals = execute_stage.build(id_ex_valid, ex_mem_pc, ex_mem_control, ex_mem_valid, ex_mem_result, ex_mem_data, reg_file, memory_stage)
+        decode_signals = decode_stage.build(if_id_valid, if_id_pc, id_ex_pc, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, reg_file, execute_stage)
+        fetch_signals = fetch_stage.build(pc, stall, if_id_pc, if_id_instruction, if_id_valid, instruction_memory, decode_stage)
+        hazard_unit.build(pc, stall, if_id_valid, if_id_instruction, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, ex_mem_control, ex_mem_valid, mem_wb_control, mem_wb_valid, fetch_signals, decode_signals, execute_signals)
         
         # 构建Driver模块，处理PC更新
-        driver.build(pipeline_regs, fetch_stage, hazard_unit)
+        driver.build(fetch_stage)
     
     return sys
 
@@ -555,7 +558,7 @@ def test_rv32i_cpu(program_file="test_program.txt"):
     sys = build_cpu(program_file)
     
     # 生成模拟器
-    simulator_path, _ = elaborate(sys, verilog=False)
+    simulator_path, _ = elaborate(sys, verilog=False, sim_threshold=5)
     raw = utils.run_simulator(simulator_path)
     print(raw)
 

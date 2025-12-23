@@ -14,12 +14,21 @@ class Driver(Module):
     
     @module.combinational
     def build(self):
-        # Create a simple counter
-        counter = RegArray(Record(value=RegArray(UInt(8), 1)), 1)
-        counter[0].value[0] = counter[0].value[0] + UInt(8)(1)
-        
-        # Log the current value
-        log('Current value: {}', counter[0].value[0])
+        cnt = RegArray(UInt(8), 2, initializer=[0, 0])
+        cnt = [cnt[0] + UInt(8)(1), cnt[1]]
+        # cnt = RegArray(UInt(8), 2, initializer=[cnt[0] + UInt(8)(1), cnt[1]])
+        log('Current value: {}', cnt[0])
+        return cnt[0]
+
+class DownstreamModule(Downstream):
+    def __init__(self):
+        super().__init__()
+
+    @downstream.combinational
+    def build(self, input_signal, temp):
+        temp[0] = input_signal
+        log('Received value in DownstreamModule: {}', input_signal)
+        return None
 
 def main():
     print("=== Simple Assassyn Program ===")
@@ -28,7 +37,10 @@ def main():
     sys = SysBuilder('simple_program')
     with sys:
         module = Driver()
-        module.build()
+        cnt = module.build()
+        temp = RegArray(UInt(8), 1)
+        another = DownstreamModule()
+        another.build(cnt, temp)
     
     # Generate and run simulator
     simulator_path, _ = elaborate(sys, verilog=False)
