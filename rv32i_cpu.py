@@ -30,11 +30,11 @@ class FetchStage(Module):
 
         log("IF_ID_VALID={}", if_id_valid[0])
 
-        instruction = stall[0].select(instruction, instruction_memory[word_addr])
-        with Condition(~stall[0]):
-            if_id_pc[0] = current_pc
-            if_id_instruction[0] = instruction
-            if_id_valid[0] = UInt(1)(1)
+        instruction = instruction_memory[word_addr]
+        with Condition(if_id_valid[0]):
+            if_id_pc[0] = stall[0].select(UInt(XLEN)(0), current_pc)
+            if_id_instruction[0] = stall[0].select(UInt(XLEN)(0), instruction)
+            if_id_valid[0] = stall[0].select(UInt(1)(0), UInt(1)(1))
             log("IF: PC={:08x}, Instruction={:08x}", current_pc, instruction)
 
         decode_stage.async_called()
@@ -63,14 +63,42 @@ class DecodeStage(Module):
         rs2 = instruction[20:24]           # bits 24:20
         funct7 = instruction[25:31]         # bits 31:25
 
-        # 提取立即数
-        immediate_i = instruction[20:31].bitcast(Int(12)).sext(Int(32)).bitcast(UInt(32))  # I型立即数
-        immediate_s = concat(instruction[7:11], instruction[25:31]).sext(Int(32)).bitcast(UInt(32))  # S型立即数
-        immediate_b = concat(instruction[31:31], instruction[7:7], instruction[25:30], instruction[8:11], UInt(1)(0)).sext(Int(32)).bitcast(UInt(32))  # B型立即数
-        immediate_u = (instruction[12:31] << UInt(XLEN)(12)).sext(Int(32)).bitcast(UInt(32))  # U型立即数
-        immediate_j = concat(instruction[31:31], instruction[12:19], instruction[20:20], instruction[21:30], UInt(1)(0)).sext(Int(32)).bitcast(UInt(32))  # J型立即数
-
-        log("Immediate_i={}", (immediate_i >> Int(XLEN)(1)))
+        # 提取立即数 - 使用手动符号扩展
+        # I型立即数 (12位有符号数)
+        imm_i_bits = instruction[20:31]
+        sign_bit_i = imm_i_bits[11:11]  # 获取符号位
+        # 手动扩展符号位：如果符号位为1，则高位全为1；否则为0
+        immediate_i = (sign_bit_i == UInt(1)(1)).select(
+            concat(Bits(20)(0xFFFFF), imm_i_bits).bitcast(UInt(32)),  # 负数扩展
+            concat(Bits(20)(0x00000), imm_i_bits).bitcast(UInt(32))   # 正数扩展
+        )
+        
+        # S型立即数 (12位有符号数)
+        imm_s_bits = concat(instruction[25:31], instruction[7:11])
+        sign_bit_s = imm_s_bits[11:11]  # 获取符号位
+        immediate_s = (sign_bit_s == UInt(1)(1)).select(
+            concat(Bits(20)(0xFFFFF), imm_s_bits).bitcast(UInt(32)),  # 负数扩展
+            concat(Bits(20)(0x00000), imm_s_bits).bitcast(UInt(32))   # 正数扩展
+        )
+        
+        # B型立即数 (13位有符号数，左移1位)
+        imm_b_bits = concat(instruction[31:31], instruction[7:7], instruction[25:30], instruction[8:11], UInt(1)(0))
+        sign_bit_b = imm_b_bits[12:12]  # 获取符号位
+        immediate_b = (sign_bit_b == UInt(1)(1)).select(
+            concat(Bits(19)(0x7FFFF), imm_b_bits).bitcast(UInt(32)),  # 负数扩展
+            concat(Bits(19)(0x00000), imm_b_bits).bitcast(UInt(32))   # 正数扩展
+        )
+        
+        # U型立即数 (20位无符号数，左移12位)
+        immediate_u = (instruction[12:31] << UInt(XLEN)(12)).bitcast(UInt(32))
+        
+        # J型立即数 (21位有符号数，左移1位)
+        imm_j_bits = concat(instruction[31:31], instruction[12:19], instruction[20:20], instruction[21:30], UInt(1)(0))
+        sign_bit_j = imm_j_bits[20:20]  # 获取符号位
+        immediate_j = (sign_bit_j == UInt(1)(1)).select(
+            concat(Bits(11)(0x7FF), imm_j_bits).bitcast(UInt(32)),  # 负数扩展
+            concat(Bits(11)(0x000), imm_j_bits).bitcast(UInt(32))   # 正数扩展
+        )
         
         # 控制信号解码
         alu_op = UInt(5)(0)
@@ -141,44 +169,51 @@ class DecodeStage(Module):
         alu_src = is_j_type.select(UInt(2)(1), alu_src)
         immediate = is_j_type.select(immediate_j, immediate)
         jump_op = is_j_type.select(UInt(1)(1), jump_op)
+
+        reg_write = (rd == UInt(5)(0)).select(UInt(1)(0), reg_write)  # rd为x0时不写入
         
         control_signals = concat(
-            alu_op,           # [4:0]   ALU操作码
-            mem_read,         # [5]     内存读
-            mem_write,        # [6]     内存写
-            reg_write,        # [7]     寄存器写
-            mem_to_reg,       # [8]     内存到寄存器
-            UInt(1)(0),       # [9]     保留位
-            alu_src,          # [10:9]  ALU输入选择
-            UInt(6)(0),       # [16:11] 保留位
-            branch_op,        # [19:17] 分支操作类型
-            jump_op,          # [20]    跳转指令标志
+            immediate[0:11],   # [41:30] 立即数低12位
+            rd,               # [29:25] rd地址
+            UInt(1)(0),       # [24]    保留位
             store_type_bits,  # [23:22] 存储类型: 00=SB, 01=SH, 10=SW
             UInt(1)(0),       # [21]    保留位
-            rd,               # [29:25] rd地址
-            immediate[0:11]   # [31:30] 立即数低12位
+            jump_op,          # [20]    跳转指令标志
+            branch_op,        # [19:17] 分支操作类型
+            UInt(6)(0),       # [16:11] 保留位
+            alu_src,          # [10:9]  ALU输入选择
+            mem_to_reg,       # [8]     内存到寄存器
+            reg_write,        # [7]     寄存器写
+            mem_write,        # [6]     内存写
+            mem_read,         # [5]     内存读
+            alu_op,           # [4:0]   ALU操作码
         )
         
         
         with Condition(if_id_valid[0]):
             id_ex_pc[0] = if_id_pc_in
-            id_ex_control[0] = control_signals
-            id_ex_valid[0] = UInt(1)(1)
-            id_ex_rs1_idx[0] = rs1
-            id_ex_rs2_idx[0] = rs2
-            id_ex_immediate[0] = immediate
+            # id_ex_control[0] = control_signals
+            # id_ex_valid[0] = UInt(1)(1)
+            # id_ex_rs1_idx[0] = rs1
+            # id_ex_rs2_idx[0] = rs2
+            # id_ex_immediate[0] = immediate
             
-            log("ID: PC={}, Opcode={:07b}, RD={}, RS1={}, RS2={}, Immediate={}, Alu_op={}, Branch_op={}, Jump_op={}, Alu_src={}, Mem_read={}, Mem_write={}, Reg_write={}, Mem_to_reg={}",
-                if_id_pc_in, opcode, rd, rs1, rs2, immediate, alu_op, branch_op, jump_op, alu_src, mem_read, mem_write, reg_write, mem_to_reg)
+            log("ID: PC={}, Opcode={:07b}, RD={}, RS1={}, RS2={}, Immediate={}, Alu_op={}, Branch_op={}, Jump_op={}, Alu_src={}, Mem_read={}, Mem_write={}, Reg_write={}, Mem_to_reg={}, Control={:042b}",
+                if_id_pc_in, opcode, rd, rs1, rs2, immediate, alu_op, branch_op, jump_op, alu_src, mem_read, mem_write, reg_write, mem_to_reg, control_signals)
         
-        rs1 = (~if_id_valid[0]).select(Bits(5)(0), rs1)
-        rs2 = (~if_id_valid[0]).select(Bits(5)(0), rs2)
-        immediate = (~if_id_valid[0]).select(UInt(XLEN)(0), immediate)
-        control_signals = (~if_id_valid[0]).select(Bits(CONTROL_LEN)(0), control_signals)
+        # rs1 = (~if_id_valid[0]).select(Bits(5)(0), rs1)
+        # rs2 = (~if_id_valid[0]).select(Bits(5)(0), rs2)
+        # immediate = (~if_id_valid[0]).select(UInt(XLEN)(0), immediate)
+        # control_signals = (~if_id_valid[0]).select(Bits(CONTROL_LEN)(0), control_signals)
 
         execute_stage.async_called()
 
+        need_rs1 = (is_i_type | is_r_type | is_s_type | is_b_type | is_l_type)
+        need_rs2 = (is_r_type | is_s_type | is_b_type)
+
         decode_signals = concat(
+            need_rs2,
+            need_rs1,
             immediate,
             rs2,
             rs1,
@@ -290,12 +325,13 @@ class ExecuteStage(Module):
             ex_mem_result[0] = alu_result
             ex_mem_data[0] = rs2_data
             
-            log("EX: PC={}, ALU_OP={:05b}, Result={:08x}, PC_Change={}, Target_PC={:08x}",
-                pc_in, alu_op, alu_result, pc_change, target_pc)
+            log("EX: PC={}, ALU_OP={:05b}, ALU_A={}, ALU_B={}, Result={:08x}, PC_Change={}, Target_PC={:08x}, Immediate={:08x}, ALU_SRC={}",
+                pc_in, alu_op, alu_a, alu_b, alu_result, pc_change, target_pc, immediate_in, alu_src)
         
         memory_stage.async_called()
 
         execute_signals = concat(
+            control_in.bitcast(Bits(CONTROL_LEN)),
             target_pc,       # [31:1]  目标PC
             pc_change,      # [0]     PC变化标志
         )
@@ -341,6 +377,9 @@ class MemoryStage(Module):
 
         writeback_stage.async_called()
 
+        memory_signals = control_in.bitcast(Bits(CONTROL_LEN))
+        return memory_signals
+
 # ==================== WB阶段：写回 ===================
 class WriteBackStage(Module):
     """写回阶段(WB)"""
@@ -368,45 +407,21 @@ class WriteBackStage(Module):
             log("WB: Write_Data={}, RD={}, WE={}",
                 wb_data, wb_rd, reg_write)
 
+        writeback_signals = control_in.bitcast(Bits(CONTROL_LEN))
+        return writeback_signals
+
 class HazardUnit(Downstream):
     def __init__(self):
         super().__init__()
 
     @downstream.combinational
-    def build(self, pc, stall, if_id_valid, if_id_instruction, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, ex_mem_control, ex_mem_valid, mem_wb_control, mem_wb_valid, fetch_signals, decode_signals, execute_signals):
-        # 解析各阶段指令的目标寄存器(rd)和写使能
-        control = id_ex_control[0]
+    def build(self, pc, stall, if_id_valid, if_id_instruction, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, ex_mem_valid, mem_wb_valid, fetch_signals, decode_signals, execute_signals, memory_signals, writeback_signals):
 
-        rd_mem = id_ex_control[0][25:29]
-        reg_write_mem = id_ex_control[0][7:7]
-        
-        rd_wb = ex_mem_control[0][25:29]
-        reg_write_wb = ex_mem_control[0][7:7]
-        
-        # 初始化数据冒险信号
-        data_hazard_ex = UInt(1)(0)  # 与EX阶段指令的数据冒险
-        data_hazard_wb = UInt(1)(0)   # 与WB阶段指令的数据冒险
-        
-        needs_rs1 = (control[0:4] != UInt(5)(0)) | (control[17:19] != UInt(3)(0)) | (control[20:20] == UInt(1)(1))  # ALU操作、分支操作或跳转操作需要rs1
-        needs_rs2 = (control[9:10] == UInt(2)(0)) & ((control[0:4] != UInt(5)(0)) | (control[17:19] != UInt(3)(0)))  # 只有当ALU源是寄存器且是ALU或分支操作时才需要rs2
-        
-        data_hazard_ex = (reg_write_mem & ((needs_rs1 & (id_ex_rs1_idx[0] == rd_mem)) | (needs_rs2 & (id_ex_rs2_idx[0] == rd_mem)))).select(UInt(1)(1), data_hazard_ex)
-
-        data_hazard_wb = (reg_write_wb & ((needs_rs1 & (id_ex_rs1_idx[0] == rd_wb)) | (needs_rs2 & (id_ex_rs2_idx[0] == rd_wb)))).select(UInt(1)(1), data_hazard_wb)
-        
-        # 综合数据冒险信号
-        data_hazard = data_hazard_ex | data_hazard_wb
-        id_ex_valid[0] = (~data_hazard)
-        if_id_valid[0] = (~data_hazard)
-        ex_mem_valid[0] = UInt(1)(1)  # ID/EX和EX/MEM阶段始终有效
-        mem_wb_valid[0] = UInt(1)(1)  # EX/MEM和MEM/WB阶段始终有效
-        stall[0] = data_hazard
-        nop_control = UInt(CONTROL_LEN)(0) # NOP控制信号，全0表示无操作
-
-
-        execute_signals = execute_signals.optional(Bits(XLEN + 1)(0))
-        decode_signals = decode_signals.optional(Bits(CONTROL_LEN + 5 + 5 + XLEN)(0))
+        execute_signals = execute_signals.optional(Bits(XLEN + 1 + CONTROL_LEN)(0))
+        decode_signals = decode_signals.optional(Bits(2 + CONTROL_LEN + 5 + 5 + XLEN)(0))
         fetch_signals = fetch_signals.optional(Bits(XLEN)(0))
+        memory_signals = memory_signals.optional(Bits(CONTROL_LEN)(0))
+        writeback_signals = writeback_signals.optional(Bits(CONTROL_LEN)(0))
 
         pc_change = execute_signals[0:0].bitcast(UInt(1))
         target_pc = execute_signals[1:XLEN].bitcast(UInt(XLEN))
@@ -415,16 +430,51 @@ class HazardUnit(Downstream):
         rs1 = decode_signals[CONTROL_LEN:CONTROL_LEN + 5 - 1].bitcast(UInt(5))
         rs2 = decode_signals[CONTROL_LEN + 5:CONTROL_LEN + 5 + 5 - 1].bitcast(UInt(5))
         control_in = decode_signals[0:CONTROL_LEN - 1].bitcast(UInt(CONTROL_LEN))
-        pc[0] = pc_change.select(target_pc, pc[0] + UInt(XLEN)(4))
-        if_id_instruction[0] = pc_change.select(UInt(XLEN)(0x00000013), instruction)  # NOP指令
-        id_ex_control[0] = pc_change.select(nop_control, control_in)
-        id_ex_immediate[0] = pc_change.select(UInt(XLEN)(0), immediate)
-        id_ex_rs1_idx[0] = pc_change.select(UInt(5)(0), rs1)
-        id_ex_rs2_idx[0] = pc_change.select(UInt(5)(0), rs2)
 
-        log("Execute_signals={}", execute_signals)
-        log("Hazard Unit: Data_Hazard={}, PC_Change={}, Target_PC={:08x}, IF_ID_VALID={}, ID_EX_VALID={}",
-            data_hazard, pc_change, target_pc, if_id_valid[0], id_ex_valid[0])
+        memory_control = execute_signals[XLEN + 1:XLEN + 1 + CONTROL_LEN - 1].bitcast(UInt(CONTROL_LEN))
+        memory_control = id_ex_valid[0].select(memory_control, UInt(CONTROL_LEN)(0))
+        rd_mem = memory_control[25:29]
+        reg_write_mem = memory_control[7:7]
+        
+        wb_control = memory_signals.bitcast(UInt(CONTROL_LEN))
+        wb_control = ex_mem_valid[0].select(wb_control, UInt(CONTROL_LEN)(0))
+        rd_wb = wb_control[25:29]
+        reg_write_wb = wb_control[7:7]
+        
+        # 初始化数据冒险信号
+        data_hazard_ex = UInt(1)(0)  # 与EX阶段指令的数据冒险
+        data_hazard_wb = UInt(1)(0)   # 与WB阶段指令的数据冒险
+        
+        needs_rs1 = decode_signals[CONTROL_LEN + 5 + 5 + XLEN:CONTROL_LEN + 5 + 5 + XLEN].bitcast(UInt(1))
+        needs_rs2 = decode_signals[CONTROL_LEN + 5 + 5 + XLEN + 1:CONTROL_LEN + 5 + 5 + XLEN + 1].bitcast(UInt(1))
+        
+        data_hazard_ex = (reg_write_mem & ((needs_rs1 & (rs1 == rd_mem)) | (needs_rs2 & (rs2 == rd_mem)))).select(UInt(1)(1), data_hazard_ex)
+
+        data_hazard_wb = (reg_write_wb & ((needs_rs1 & (rs1 == rd_wb)) | (needs_rs2 & (rs2 == rd_wb)))).select(UInt(1)(1), data_hazard_wb)
+        
+        # 综合数据冒险信号
+        data_hazard = ((data_hazard_ex | data_hazard_wb) & ~pc_change)
+        id_ex_valid[0] = (~data_hazard)
+        if_id_valid[0] = (~data_hazard)
+        ex_mem_valid[0] = UInt(1)(1)  # ID/EX和EX/MEM阶段始终有效
+        mem_wb_valid[0] = UInt(1)(1)  # EX/MEM和MEM/WB阶段始终有效
+        stall[0] = data_hazard
+        nop_control = UInt(CONTROL_LEN)(0) # NOP控制信号，全0表示无操作
+
+        # 更新PC和IF/ID寄存器        
+        pc[0] = pc_change.select(target_pc, data_hazard.select(pc[0], pc[0] + UInt(XLEN)(4)))
+        with Condition(~stall[0]):
+            if_id_instruction[0] = pc_change.select(UInt(XLEN)(0x00000013), instruction)  # NOP指令
+        with Condition(if_id_valid[0]):
+            id_ex_control[0] = pc_change.select(nop_control, control_in)
+            id_ex_immediate[0] = pc_change.select(UInt(XLEN)(0), immediate)
+            id_ex_rs1_idx[0] = pc_change.select(UInt(5)(0), rs1)
+            id_ex_rs2_idx[0] = pc_change.select(UInt(5)(0), rs2)
+
+        log("RD_MEM={}, REG_WRITE_MEM={}, RD_WB={}, REG_WRITE_WB={}",
+            rd_mem, reg_write_mem, rd_wb, reg_write_wb)
+        log("Hazard Unit: Data_Hazard={}, PC_Change={}, Target_PC={:08x}, IF_ID_VALID={}, ID_EX_VALID={}, Immediate={:08x}, RS1={}, RS2={}, Control={:042b}",
+            data_hazard, pc_change, target_pc, if_id_valid[0], id_ex_valid[0], immediate, rs1, rs2, control_in)
 
 # ==================== 顶层CPU模块 ===================
 class Driver(Module):
@@ -516,12 +566,12 @@ def build_cpu(program_file="test_program.txt"):
         driver = Driver()
 
         # 按照流水线顺序构建模块
-        writeback_stage.build(mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, mem_wb_control, reg_file)
-        memory_stage.build(ex_mem_valid, ex_mem_result, ex_mem_pc, ex_mem_data, ex_mem_control, mem_wb_control, mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, writeback_stage, data_sram)
+        writeback_signals = writeback_stage.build(mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, mem_wb_control, reg_file)
+        memory_signals = memory_stage.build(ex_mem_valid, ex_mem_result, ex_mem_pc, ex_mem_data, ex_mem_control, mem_wb_control, mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, writeback_stage, data_sram)
         execute_signals = execute_stage.build(id_ex_valid, id_ex_pc, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_control, ex_mem_pc, ex_mem_control, ex_mem_valid, ex_mem_result, ex_mem_data, reg_file, memory_stage)
         decode_signals = decode_stage.build(if_id_valid, if_id_pc, if_id_instruction, id_ex_pc, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, reg_file, execute_stage)
         fetch_signals = fetch_stage.build(pc, stall, if_id_pc, if_id_instruction, if_id_valid, instruction_memory, decode_stage)
-        hazard_unit.build(pc, stall, if_id_valid, if_id_instruction, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, ex_mem_control, ex_mem_valid, mem_wb_control, mem_wb_valid, fetch_signals, decode_signals, execute_signals)
+        hazard_unit.build(pc, stall, if_id_valid, if_id_instruction, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, ex_mem_valid, mem_wb_valid, fetch_signals, decode_signals, execute_signals, memory_signals, writeback_signals)
         
         # 构建Driver模块，处理PC更新
         driver.build(fetch_stage)
