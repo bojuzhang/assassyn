@@ -843,28 +843,67 @@ remu    - 无符号取余
 
 ### 环境设置
 
-1. 确保 assassyn 环境已正确设置：
-```bash
-source /home/zhangboju/assassyn/setup.sh
-```
+本项目使用 apptainer 容器运行，无需依赖外部 assassyn 仓库。所有必要的 assassyn 环境已打包在 `assassyn.sif` 容器镜像中。
 
-2. 安装依赖：
-```bash
-cd /home/zhangboju/assassyn
-make build-all
-```
+### 运行程序
 
-### 运行测试
+使用 apptainer 运行项目中的任何 Python 程序：
 
 ```bash
 # 运行简单测试
-python test.py
+apptainer exec ./assassyn.sif python ./test.py
 
-# 运行 CPU 测试
-python test_rv32i.py
+# 运行其他示例程序
+apptainer exec ./assassyn.sif python ./simple_counter.py
+apptainer exec ./assassyn.sif python ./array_increment.py
+```
 
-# 运行基准测试
-python run_benchmark.py
+### 运行 rv32i_cpu.py
+
+运行 [`rv32i_cpu.py`](rv32i_cpu.py:1) 时，目录下必须包含以下两个文件：
+
+1. **test_program.txt** - 存储程序反编译后的十六进制结果
+   - 格式：每行一个十六进制数，包含 `0x` 前缀
+   - 示例：
+     ```
+     0x00000013
+     0x00000593
+     0x00000513
+     ```
+
+2. **data.hex** - 存储数据的十六进制结果
+   - 格式：每行一个十六进制数，**不包含** `0x` 前缀
+   - 示例：
+     ```
+     00000001
+     00000002
+     00000003
+     ```
+
+运行命令：
+```bash
+apptainer exec ./assassyn.sif python ./rv32i_cpu.py
+```
+
+### 生成测试数据
+
+使用 [`gen_hex.py`](gen_hex.py:1) 生成 `data.hex` 文件：
+```bash
+apptainer exec ./assassyn.sif python ./gen_hex.py
+```
+
+### 运行基准测试
+
+基准测试程序位于 `benchmarks/` 目录下。每个基准测试目录包含：
+- C 源代码（`test.c`）
+- 十六进制机器码（`test.hex`）
+- 程序文本格式（`program.txt`）
+
+运行基准测试前，需要将对应的 `program.txt` 复制为 `test_program.txt`：
+```bash
+# 示例：运行 add_while 基准测试
+cp benchmarks/add_while/program.txt test_program.txt
+apptainer exec ./assassyn.sif python ./rv32i_cpu.py
 ```
 
 ### 调试技巧
