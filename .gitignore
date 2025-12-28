@@ -3,3 +3,8 @@ assassyn.sif
 result.out
 data.hex
 test_program.txt
+/docs_assassyn
+/examples_assassyn
+/__pycache__
+/benchmarks/self_test
+/my_doc

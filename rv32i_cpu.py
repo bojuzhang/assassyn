@@ -2,6 +2,7 @@
 """
 五级流水线RV32I CPU实现
 使用Assassyn语言实现完整的RISC-V 32位基础指令集处理器
+支持BTB + 2-bit饱和计数器动态分支预测
 """
 
 from assassyn.frontend import *
@@ -14,28 +15,54 @@ from assassyn.ir.module import downstream, Downstream
 XLEN = 32  # RISC-V XLEN
 REG_COUNT = 32  # 通用寄存器数量
 CONTROL_LEN = 42 # 控制信号长度
+BTB_SIZE = 64  # BTB表大小
+BTB_INDEX_BITS = 6  # BTB索引位数 (log2(64)=6)
+PREDICTION_INFO_LEN = 34  # 预测信息长度: [0]: btb_hit, [1]: predict_taken, [2:33]: predicted_pc
+PREDICTION_RESULT_LEN = 68  # 预测结果长度
 
 # ==================== IF阶段：指令获取 ===================
 class FetchStage(Module):
-    """指令获取阶段(IF)"""
+    """指令获取阶段(IF) - 包含BTB预测逻辑"""
     def __init__(self):
         super().__init__(ports={
         })
     
     @module.combinational
-    def build(self, pc, stall, if_id_pc, if_id_instruction, if_id_valid, instruction_memory, decode_stage):
+    def build(self, pc, stall, if_id_pc, if_id_instruction, if_id_valid, if_id_prediction_info, instruction_memory, btb, bht, btb_valid, decode_stage):
         current_pc = pc[0]
         word_addr = current_pc >> UInt(XLEN)(2)
         instruction = UInt(XLEN)(0)
 
-        log("IF_ID_VALID={}", if_id_valid[0])
-
         instruction = instruction_memory[word_addr]
+        
+        # BTB查询逻辑 - 使用PC[2:7]作为索引(6位)
+        btb_index = current_pc[2:7].bitcast(UInt(BTB_INDEX_BITS))
+        
+        # 读取BTB、BHT和有效位
+        btb_entry = btb[btb_index]  # 预测目标地址
+        bht_entry = bht[btb_index]  # 2-bit饱和计数器
+        btb_valid_bit = btb_valid[btb_index]  # 有效位
+        
+        # BTB命中判断
+        btb_hit = btb_valid_bit
+        
+        # 根据BHT值判断预测方向: bht >= 2 预测跳转
+        predict_taken = (bht_entry >= UInt(2)(2)).select(UInt(1)(1), UInt(1)(0))
+        
+        # 如果BTB命中且预测跳转,使用BTB中的目标地址
+        predicted_pc = (btb_hit & predict_taken).select(btb_entry, current_pc + UInt(XLEN)(4))
+        
+        # 构建预测信息: [0]: btb_hit, [1]: predict_taken, [2:33]: predicted_pc
+        prediction_info = concat(
+            predicted_pc,           # [33:2] 预测的PC (32位)
+            predict_taken,          # [1]    预测是否跳转
+            btb_hit                 # [0]    BTB是否命中
+        ).bitcast(UInt(PREDICTION_INFO_LEN))
+
         with Condition(if_id_valid[0]):
             if_id_pc[0] = stall[0].select(UInt(XLEN)(0), current_pc)
-            # if_id_instruction[0] = stall[0].select(UInt(XLEN)(0), instruction)
             if_id_valid[0] = stall[0].select(UInt(1)(0), UInt(1)(1))
-            log("IF: PC={:08x}, Instruction={:08x}", current_pc, instruction)
+            if_id_prediction_info[0] = stall[0].select(UInt(PREDICTION_INFO_LEN)(0), prediction_info)
 
         decode_stage.async_called()
 
@@ -44,16 +71,17 @@ class FetchStage(Module):
 
 # ==================== ID阶段：指令解码 ===================
 class DecodeStage(Module):
-    """指令解码阶段(ID)"""
+    """指令解码阶段(ID) - 传递预测信息"""
     def __init__(self):
         super().__init__(ports={})
     
     @module.combinational
-    def build(self, if_id_valid, if_id_pc, if_id_instruction, id_ex_pc, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_need_rs1, id_ex_need_rs2, reg_file, execute_stage):
+    def build(self, if_id_valid, if_id_pc, if_id_instruction, if_id_prediction_info, id_ex_pc, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_need_rs1, id_ex_need_rs2, id_ex_prediction_info, reg_file, execute_stage):
         if_id_pc_in = if_id_pc[0]
         instruction = if_id_instruction[0]
+        prediction_info_in = if_id_prediction_info[0]
 
-        log("Instruction={:08x}", instruction)
+        # log("Instruction={:08x}", instruction)
         
         # 如果指令无效，直接返回，不更新ID/EX寄存器
         opcode = instruction[0:6]          # bits 6:0
@@ -204,6 +232,8 @@ class DecodeStage(Module):
             id_ex_pc[0] = if_id_valid[0].select(if_id_pc_in, UInt(XLEN)(0))
             id_ex_need_rs1[0] = if_id_valid[0].select(need_rs1, Bits(1)(0))
             id_ex_need_rs2[0] = if_id_valid[0].select(need_rs2, Bits(1)(0))
+            # 传递预测信息到EX阶段
+            id_ex_prediction_info[0] = if_id_valid[0].select(prediction_info_in, UInt(PREDICTION_INFO_LEN)(0))
             
             # id_ex_control[0] = control_signals
             # id_ex_valid[0] = UInt(1)(1)
@@ -211,8 +241,8 @@ class DecodeStage(Module):
             # id_ex_rs2_idx[0] = rs2
             # id_ex_immediate[0] = immediate
             
-            log("ID: PC={}, Opcode={:07b}, RD={}, RS1={}, RS2={}, Immediate={}, Alu_op={}, Branch_op={}, Jump_op={}, Alu_src={}, Mem_read={}, Mem_write={}, Reg_write={}, Mem_to_reg={}, Control={:042b}",
-                if_id_pc_in, opcode, rd, rs1, rs2, immediate, alu_op, branch_op, jump_op, alu_src, mem_read, mem_write, reg_write, mem_to_reg, control_signals)
+            # log("ID: PC={}, Opcode={:07b}, RD={}, RS1={}, RS2={}, Immediate={}, Alu_op={}, Branch_op={}, Jump_op={}, Alu_src={}, Mem_read={}, Mem_write={}, Reg_write={}, Mem_to_reg={}, Control={:042b}",
+                # if_id_pc_in, opcode, rd, rs1, rs2, immediate, alu_op, branch_op, jump_op, alu_src, mem_read, mem_write, reg_write, mem_to_reg, control_signals)
         
         # rs1 = (~if_id_valid[0]).select(Bits(5)(0), rs1)
         # rs2 = (~if_id_valid[0]).select(Bits(5)(0), rs2)
@@ -222,6 +252,7 @@ class DecodeStage(Module):
         execute_stage.async_called()
 
         decode_signals = concat(
+            id_ex_valid[0].select(if_id_valid[0].select(prediction_info_in, UInt(PREDICTION_INFO_LEN)(0)), id_ex_prediction_info[0]),  # 预测信息 (34位)
             id_ex_valid[0].select(if_id_valid[0].select(need_rs2.bitcast(UInt(1)), UInt(1)(0)), id_ex_need_rs2[0]), 
             id_ex_valid[0].select(if_id_valid[0].select(need_rs1.bitcast(UInt(1)), UInt(1)(0)), id_ex_need_rs1[0]),
             id_ex_valid[0].select(if_id_valid[0].select(immediate, UInt(XLEN)(0)), id_ex_immediate[0]),
@@ -233,7 +264,7 @@ class DecodeStage(Module):
 
 # ==================== EX阶段：执行 ===================
 class ExecuteStage(Module):
-    """执行阶段(EX)"""
+    """执行阶段(EX) - 包含预测验证逻辑"""
     def __init__(self):
         super().__init__(ports={})
     
@@ -257,8 +288,8 @@ class ExecuteStage(Module):
         result = (op == UInt(5)(0b01000)).select((a | b).bitcast(UInt(XLEN)), result)  # OR
         result = (op == UInt(5)(0b01001)).select((a & b).bitcast(UInt(XLEN)), result)  # AND
         
-        log("ALU: OP={:05b}, A={:08x}, B={:08x}, Result={:08x}",
-            op, a, b, result)
+        # log("ALU: OP={:05b}, A={:08x}, B={:08x}, Result={:08x}",
+            # op, a, b, result)
         
         return result
 
@@ -274,18 +305,19 @@ class ExecuteStage(Module):
         taken = (op == UInt(3)(0b101)).select((a < b).select(UInt(1)(1), UInt(1)(0)), taken)  # BLTU
         taken = (op == UInt(3)(0b110)).select((a >= b).select(UInt(1)(1), UInt(1)(0)), taken)  # BGEU
         
-        log("BRANCH: OP={:03b}, A={:08x}, B={:08x}, Taken={}",
-            op, a, b, taken)
+        # log("BRANCH: OP={:03b}, A={:08x}, B={:08x}, Taken={}",
+        #     op, a, b, taken)
         
         return taken
 
     @module.combinational
-    def build(self, id_ex_valid, id_ex_pc, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_control, ex_mem_pc, ex_mem_control, ex_mem_valid, ex_mem_result, ex_mem_data, reg_file, memory_stage):
+    def build(self, id_ex_valid, id_ex_pc, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_control, id_ex_prediction_info, ex_mem_pc, ex_mem_control, ex_mem_valid, ex_mem_result, ex_mem_data, reg_file, memory_stage):
         pc_in = id_ex_pc[0]
         rs1_idx = id_ex_rs1_idx[0]
         rs2_idx = id_ex_rs2_idx[0]
         immediate_in = id_ex_immediate[0]
         control_in = id_ex_control[0]
+        prediction_info_in = id_ex_prediction_info[0]
 
         # 直接从寄存器文件读取rs1和rs2的值
         rs1_data = reg_file[rs1_idx]
@@ -308,6 +340,11 @@ class ExecuteStage(Module):
         rd_addr = control_in[25:29]  # rd地址
         immediate = control_in[22:31]  # 立即数
         
+        # 解析预测信息: [0]: btb_hit, [1]: predict_taken, [2:33]: predicted_pc
+        btb_hit = prediction_info_in[0:0]
+        predict_taken = prediction_info_in[1:1]
+        predicted_pc = prediction_info_in[2:33].bitcast(UInt(XLEN))
+        
         # ALU输入B选择
         alu_b = immediate_in
         alu_b = (alu_src == UInt(2)(0)).select(rs2_data, alu_b)
@@ -324,13 +361,34 @@ class ExecuteStage(Module):
         alu_a = rs1_data
         alu_a = (alu_src == UInt(2)(2)).select(pc_in, alu_a)
 
-        branch_result = is_branch.select(self.branch_unit(branch_op, rs1_data, rs2_data), UInt(1)(0))
-        alu_result = is_branch.select(UInt(XLEN)(0), (is_jump | is_jumpr).select(pc_in + UInt(XLEN)(4), self.alu_unit(alu_op, alu_a, alu_b)))
-        target_pc = (is_branch | is_jump).select(pc_in + immediate_in, target_pc)
+        # 计算实际分支结果
+        actual_taken = is_branch.select(self.branch_unit(branch_op, rs1_data, rs2_data), UInt(1)(0))
+        
+        # 计算实际目标地址
+        actual_target_pc = pc_in + immediate_in
         new_pc_temp = rs1_data + immediate_in
         new_pc = (new_pc_temp ^ (new_pc_temp & UInt(XLEN)(1)))
+        
+        # 分支正确的下一个PC (taken则跳转到目标，否则PC+4)
+        correct_pc = actual_taken.select(actual_target_pc, pc_in + UInt(XLEN)(4))
+        
+        # 预测验证逻辑 (根据branch_prediction_rules.md)
+        # BTB命中时: prediction_correct = (predict_taken == actual_taken) && (predicted_pc == correct_pc)
+        # BTB未命中时: prediction_correct = !actual_taken
+        prediction_correct_hit = ((predict_taken == actual_taken) & (predicted_pc == correct_pc)).select(UInt(1)(1), UInt(1)(0))
+        prediction_correct_miss = (~actual_taken).select(UInt(1)(1), UInt(1)(0))
+        prediction_correct = btb_hit.select(prediction_correct_hit, prediction_correct_miss)
+        
+        # 仅对分支指令生成mispredict信号
+        mispredict = (is_branch & ~prediction_correct).select(UInt(1)(1), UInt(1)(0))
+        
+        alu_result = is_branch.select(UInt(XLEN)(0), (is_jump | is_jumpr).select(pc_in + UInt(XLEN)(4), self.alu_unit(alu_op, alu_a, alu_b)))
+        target_pc = (is_branch | is_jump).select(actual_target_pc, target_pc)
         target_pc = is_jumpr.select(new_pc.bitcast(UInt(32)), target_pc)
-        pc_change = (branch_result.bitcast(Bits(1)) | is_jump | is_jumpr).select(UInt(1)(1), pc_change)
+        
+        # 需要刷新的情况: 预测错误、JAL、JALR
+        need_flush = (mispredict | is_jump | is_jumpr).select(UInt(1)(1), UInt(1)(0))
+        pc_change = need_flush
 
         with Condition(is_jump & (immediate_in == UInt(XLEN)(0))):
             log("Finish Execution. The result is {}", reg_file[10])
@@ -344,15 +402,40 @@ class ExecuteStage(Module):
             ex_mem_result[0] = id_ex_valid[0].select(alu_result, UInt(XLEN)(0))
             ex_mem_data[0] = id_ex_valid[0].select(rs2_data, UInt(XLEN)(0))
             
-            log("EX: PC={}, ALU_OP={:05b}, ALU_A={}, ALU_B={}, Result={:08x}, PC_Change={}, Target_PC={:08x}, Immediate={:08x}, ALU_SRC={}",
-                pc_in, alu_op, alu_a, alu_b, alu_result, pc_change, target_pc, immediate_in, alu_src)
+            # log("EX: PC={}, ALU_OP={:05b}, ALU_A={}, ALU_B={}, Result={:08x}, PC_Change={}, Target_PC={:08x}, Immediate={:08x}, ALU_SRC={}",
+            #     pc_in, alu_op, alu_a, alu_b, alu_result, pc_change, target_pc, immediate_in, alu_src)
         
         memory_stage.async_called()
 
+        # 构建预测结果:
+        # [0]: mispredict (预测错误标志)
+        # [1:32]: correct_pc (正确的PC)
+        # [33]: actual_taken (实际跳转标志)
+        # [34:65]: actual_target_pc (实际目标地址)
+        # [66]: btb_hit
+        # [67]: predict_taken
+        # [68:99]: pc_in (分支指令PC，用于计算BTB索引)
+        # [100]: is_branch
+        # [101]: is_jump
+        # [102]: is_jumpr
+        prediction_result = concat(
+            is_jumpr.bitcast(Bits(1)),           # [102] is_jumpr
+            is_jump.bitcast(Bits(1)),            # [101] is_jump
+            is_branch.bitcast(Bits(1)),          # [100] is_branch
+            pc_in.bitcast(Bits(XLEN)),           # [99:68] 分支指令的PC
+            predict_taken.bitcast(Bits(1)),      # [67] 预测是否跳转
+            btb_hit.bitcast(Bits(1)),            # [66] BTB是否命中
+            actual_target_pc.bitcast(Bits(XLEN)), # [65:34] 实际目标地址
+            actual_taken.bitcast(Bits(1)),       # [33] 实际跳转标志
+            correct_pc.bitcast(Bits(XLEN)),      # [32:1] 正确的PC
+            mispredict.bitcast(Bits(1))          # [0] 预测错误标志
+        )
+
         execute_signals = concat(
+            id_ex_valid[0].select(prediction_result, Bits(103)(0)),  # 预测结果
             id_ex_valid[0].select(control_in.bitcast(Bits(CONTROL_LEN)), Bits(CONTROL_LEN)(0)),
-            id_ex_valid[0].select(target_pc, UInt(XLEN)(0)),       # [31:1]  目标PC
-            id_ex_valid[0].select(pc_change, UInt(1)(0)),      # [0]     PC变化标志
+            id_ex_valid[0].select(target_pc.bitcast(Bits(XLEN)), Bits(XLEN)(0)),       # [31:1]  目标PC
+            id_ex_valid[0].select(pc_change.bitcast(Bits(1)), Bits(1)(0)),      # [0]     PC变化标志
         )
 
         return execute_signals
@@ -393,8 +476,8 @@ class MemoryStage(Module):
             # mem_wb_valid[0] = ex_mem_valid[0].select(UInt(1)(1), UInt(1)(0))
             mem_wb_ex_result[0] = ex_mem_valid[0].select(ex_mem_result[0], UInt(XLEN)(0))
             
-            log("MEM: PC={}, Addr={:08x}, Read={}, Write={}, data_in={}, data_out={}",
-                pc_in, addr_in, mem_read, mem_write, data_in, data_sram.dout[0])
+            # log("MEM: PC={}, Addr={:08x}, Read={}, Write={}, data_in={}, data_out={}",
+            #     pc_in, addr_in, mem_read, mem_write, data_in, data_sram.dout[0])
 
 
         writeback_stage.async_called()
@@ -426,34 +509,68 @@ class WriteBackStage(Module):
         with Condition(mem_wb_valid[0]):
             with Condition(reg_write):
                 reg_file[wb_rd] = wb_data
-            log("WB: Write_Data={}, RD={}, WE={}",
-                wb_data, wb_rd, reg_write)
+            # log("WB: Write_Data={}, RD={}, WE={}",
+            #     wb_data, wb_rd, reg_write)
+            success = (wb_data == UInt(XLEN)(5050))
+            with Condition(success):
+                log("SUCCESSFUL!")
 
         writeback_signals = control_in.bitcast(Bits(CONTROL_LEN))
         return writeback_signals
 
 class HazardUnit(Downstream):
+    """冒险检测单元 - 包含分支预测器更新逻辑"""
     def __init__(self):
         super().__init__()
 
     @downstream.combinational
-    def build(self, pc, stall, if_id_valid, if_id_instruction, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, ex_mem_valid, mem_wb_valid, fetch_signals, decode_signals, execute_signals, memory_signals, writeback_signals):
+    def build(self, pc, stall, if_id_valid, if_id_instruction, if_id_prediction_info, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_prediction_info, ex_mem_valid, mem_wb_valid, btb, bht, btb_valid, fetch_signals, decode_signals, execute_signals, memory_signals, writeback_signals):
 
-        execute_signals = execute_signals.optional(Bits(XLEN + 1 + CONTROL_LEN)(0))
-        decode_signals = decode_signals.optional(Bits(2 + CONTROL_LEN + 5 + 5 + XLEN)(0))
+        # 计算新的信号长度
+        EXECUTE_SIGNALS_LEN = XLEN + 1 + CONTROL_LEN + 103  # pc_change(1) + target_pc(32) + control(42) + prediction_result(103)
+        DECODE_SIGNALS_LEN = 2 + CONTROL_LEN + 5 + 5 + XLEN + PREDICTION_INFO_LEN  # need_rs1(1) + need_rs2(1) + control(42) + rs1(5) + rs2(5) + immediate(32) + prediction_info(34)
+
+        execute_signals = execute_signals.optional(Bits(EXECUTE_SIGNALS_LEN)(0))
+        decode_signals = decode_signals.optional(Bits(DECODE_SIGNALS_LEN)(0))
         fetch_signals = fetch_signals.optional(Bits(XLEN)(0))
         memory_signals = memory_signals.optional(Bits(CONTROL_LEN)(0))
         writeback_signals = writeback_signals.optional(Bits(CONTROL_LEN)(0))
 
+        # 解析execute_signals
         pc_change = execute_signals[0:0].bitcast(UInt(1))
         target_pc = execute_signals[1:XLEN].bitcast(UInt(XLEN))
+        
+        # 解析预测结果 (从execute_signals中提取)
+        # execute_signals布局: [0]: pc_change, [1:32]: target_pc, [33:74]: control, [75:177]: prediction_result
+        pred_result_start = XLEN + 1 + CONTROL_LEN
+        prediction_result = execute_signals[pred_result_start:pred_result_start + 102].bitcast(UInt(103))
+        
+        # 解析prediction_result:
+        # [0]: mispredict, [1:32]: correct_pc, [33]: actual_taken, [34:65]: actual_target_pc
+        # [66]: btb_hit, [67]: predict_taken, [68:99]: pc_in, [100]: is_branch, [101]: is_jump, [102]: is_jumpr
+        mispredict = prediction_result[0:0].bitcast(UInt(1))
+        correct_pc = prediction_result[1:32].bitcast(UInt(XLEN))
+        actual_taken = prediction_result[33:33].bitcast(UInt(1))
+        actual_target_pc = prediction_result[34:65].bitcast(UInt(XLEN))
+        pred_btb_hit = prediction_result[66:66].bitcast(UInt(1))
+        pred_predict_taken = prediction_result[67:67].bitcast(UInt(1))
+        branch_pc = prediction_result[68:99].bitcast(UInt(XLEN))
+        is_branch_ex = prediction_result[100:100].bitcast(UInt(1))
+        is_jump_ex = prediction_result[101:101].bitcast(UInt(1))
+        is_jumpr_ex = prediction_result[102:102].bitcast(UInt(1))
+        
         instruction = fetch_signals.bitcast(UInt(XLEN))
-        immediate = decode_signals[CONTROL_LEN + 5 + 5:CONTROL_LEN + 5 + 5 + XLEN - 1].bitcast(UInt(XLEN))
-        rs1 = decode_signals[CONTROL_LEN:CONTROL_LEN + 5 - 1].bitcast(UInt(5))
-        rs2 = decode_signals[CONTROL_LEN + 5:CONTROL_LEN + 5 + 5 - 1].bitcast(UInt(5))
+        
+        # 解析decode_signals (新布局)
         control_in = decode_signals[0:CONTROL_LEN - 1].bitcast(UInt(CONTROL_LEN))
+        rs1 = decode_signals[CONTROL_LEN:CONTROL_LEN + 4].bitcast(UInt(5))
+        rs2 = decode_signals[CONTROL_LEN + 5:CONTROL_LEN + 9].bitcast(UInt(5))
+        immediate = decode_signals[CONTROL_LEN + 10:CONTROL_LEN + 10 + XLEN - 1].bitcast(UInt(XLEN))
+        needs_rs1 = decode_signals[CONTROL_LEN + 10 + XLEN:CONTROL_LEN + 10 + XLEN].bitcast(UInt(1))
+        needs_rs2 = decode_signals[CONTROL_LEN + 10 + XLEN + 1:CONTROL_LEN + 10 + XLEN + 1].bitcast(UInt(1))
+        prediction_info_id = decode_signals[CONTROL_LEN + 10 + XLEN + 2:CONTROL_LEN + 10 + XLEN + 2 + PREDICTION_INFO_LEN - 1].bitcast(UInt(PREDICTION_INFO_LEN))
 
-        memory_control = execute_signals[XLEN + 1:XLEN + 1 + CONTROL_LEN - 1].bitcast(UInt(CONTROL_LEN))
+        memory_control = execute_signals[XLEN + 1:XLEN + CONTROL_LEN].bitcast(UInt(CONTROL_LEN))
         memory_control = id_ex_valid[0].select(memory_control, UInt(CONTROL_LEN)(0))
         rd_mem = memory_control[25:29]
         reg_write_mem = memory_control[7:7]
@@ -467,36 +584,78 @@ class HazardUnit(Downstream):
         data_hazard_ex = UInt(1)(0)  # 与EX阶段指令的数据冒险
         data_hazard_wb = UInt(1)(0)   # 与WB阶段指令的数据冒险
         
-        needs_rs1 = decode_signals[CONTROL_LEN + 5 + 5 + XLEN:CONTROL_LEN + 5 + 5 + XLEN].bitcast(UInt(1))
-        needs_rs2 = decode_signals[CONTROL_LEN + 5 + 5 + XLEN + 1:CONTROL_LEN + 5 + 5 + XLEN + 1].bitcast(UInt(1))
-        
         data_hazard_ex = (reg_write_mem & ((needs_rs1 & (rs1 == rd_mem)) | (needs_rs2 & (rs2 == rd_mem)))).select(UInt(1)(1), data_hazard_ex)
-
         data_hazard_wb = (reg_write_wb & ((needs_rs1 & (rs1 == rd_wb)) | (needs_rs2 & (rs2 == rd_wb)))).select(UInt(1)(1), data_hazard_wb)
         
-        # 综合数据冒险信号
-        data_hazard = ((data_hazard_ex | data_hazard_wb) & ~pc_change)
+        # 需要刷新的情况: mispredict || is_jump || is_jumpr
+        need_flush = (mispredict | is_jump_ex | is_jumpr_ex).select(UInt(1)(1), UInt(1)(0))
+        
+        # 根据规则: 预测错误优先级高于数据冒险
+        # stall[0] = data_hazard && !mispredict && !is_jump && !is_jumpr
+        data_hazard = ((data_hazard_ex | data_hazard_wb) & ~need_flush)
+        
         id_ex_valid[0] = (~data_hazard)
         if_id_valid[0] = (~data_hazard)
-        ex_mem_valid[0] = UInt(1)(1)  # ID/EX和EX/MEM阶段始终有效
-        mem_wb_valid[0] = UInt(1)(1)  # EX/MEM和MEM/WB阶段始终有效
+        ex_mem_valid[0] = UInt(1)(1)
+        mem_wb_valid[0] = UInt(1)(1)
         stall[0] = data_hazard
-        nop_control = UInt(CONTROL_LEN)(0) # NOP控制信号，全0表示无操作
+        nop_control = UInt(CONTROL_LEN)(0)
 
-        # 更新PC和IF/ID寄存器        
-        pc[0] = pc_change.select(target_pc, data_hazard.select(pc[0], pc[0] + UInt(XLEN)(4)))
+        # BTB索引计算
+        btb_update_index = branch_pc[2:7].bitcast(UInt(BTB_INDEX_BITS))
+        
+        # 分支预测器更新逻辑 (仅在is_branch == 1时更新)
+        # 根据branch_prediction_rules.md:
+        # - 更新BTB: btb[index] = actual_target_pc, btb_valid[index] = 1
+        # - 更新BHT (2-bit饱和计数器):
+        #   - actual_taken == 1: bht[index] = (bht[index] == 3) ? 3 : bht[index] + 1
+        #   - actual_taken == 0: bht[index] = (bht[index] == 0) ? 0 : bht[index] - 1
+        current_bht = bht[btb_update_index]
+        new_bht_taken = (current_bht == UInt(2)(3)).select(UInt(2)(3), current_bht + UInt(2)(1))
+        new_bht_not_taken = (current_bht == UInt(2)(0)).select(UInt(2)(0), current_bht - UInt(2)(1))
+        new_bht = actual_taken.select(new_bht_taken, new_bht_not_taken)
+        
+        with Condition(is_branch_ex):
+            btb[btb_update_index] = actual_target_pc
+            btb_valid[btb_update_index] = UInt(1)(1)
+            bht[btb_update_index] = new_bht
+
+        # PC更新逻辑 (根据branch_prediction_rules.md)
+        # need_flush == 1:
+        #   - JALR指令: pc[0] = (rs1_data + immediate_in) & ~1 (已在target_pc中计算)
+        #   - 其他情况: pc[0] = correct_pc
+        # need_flush == 0:
+        #   - 数据冒险: pc[0] = pc[0] (保持不变)
+        #   - 无数据冒险: 
+        #     - 如果有预测且预测跳转，使用预测的PC
+        #     - 否则 pc[0] = pc[0] + 4
+        
+        # 从IF阶段获取当前指令的预测信息
+        current_btb_hit = if_id_prediction_info[0][0:0].bitcast(UInt(1))
+        current_predict_taken = if_id_prediction_info[0][1:1].bitcast(UInt(1))
+        current_predicted_pc = if_id_prediction_info[0][2:33].bitcast(UInt(XLEN))
+        
+        # 正常情况下的下一个PC
+        # 如果BTB命中且预测跳转，使用预测的目标PC
+        normal_next_pc = (current_btb_hit & current_predict_taken).select(current_predicted_pc, pc[0] + UInt(XLEN)(4))
+        
+        # PC更新
+        # JALR时使用target_pc (因为在EX阶段已经计算为 (rs1 + imm) & ~1)
+        flush_pc = is_jumpr_ex.select(target_pc, correct_pc)
+        pc[0] = need_flush.select(flush_pc, data_hazard.select(pc[0], normal_next_pc))
+        
+        # 流水线刷新 (根据branch_prediction_rules.md)
+        # IF/ID阶段刷新: if_id_valid[0] = 0, if_id_pc[0] = 0, if_id_instruction[0] = NOP
+        # ID/EX阶段刷新: 清空所有寄存器
         with Condition(if_id_valid[0]):
-            if_id_instruction[0] = pc_change.select(UInt(XLEN)(0x00000013), instruction)  # NOP指令
+            if_id_instruction[0] = need_flush.select(UInt(XLEN)(0x00000013), instruction)  # NOP指令
+            if_id_prediction_info[0] = need_flush.select(UInt(PREDICTION_INFO_LEN)(0), prediction_info_id)
         with Condition(id_ex_valid[0]):
-            id_ex_control[0] = pc_change.select(nop_control, control_in)
-            id_ex_immediate[0] = pc_change.select(UInt(XLEN)(0), immediate)
-            id_ex_rs1_idx[0] = pc_change.select(UInt(5)(0), rs1)
-            id_ex_rs2_idx[0] = pc_change.select(UInt(5)(0), rs2)
-
-        log("RD_MEM={}, REG_WRITE_MEM={}, RD_WB={}, REG_WRITE_WB={}",
-            rd_mem, reg_write_mem, rd_wb, reg_write_wb)
-        log("Hazard Unit: Data_Hazard={}, PC_Change={}, Target_PC={:08x}, IF_ID_VALID={}, ID_EX_VALID={}, Immediate={:08x}, RS1={}, RS2={}, Control={:042b}",
-            data_hazard, pc_change, target_pc, if_id_valid[0], id_ex_valid[0], immediate, rs1, rs2, control_in)
+            id_ex_control[0] = need_flush.select(nop_control, control_in)
+            id_ex_immediate[0] = need_flush.select(UInt(XLEN)(0), immediate)
+            id_ex_rs1_idx[0] = need_flush.select(UInt(5)(0), rs1)
+            id_ex_rs2_idx[0] = need_flush.select(UInt(5)(0), rs2)
+            id_ex_prediction_info[0] = need_flush.select(UInt(PREDICTION_INFO_LEN)(0), prediction_info_id)
 
 # ==================== 顶层CPU模块 ===================
 class Driver(Module):
@@ -537,7 +696,7 @@ def init_memory(self, program_file="test_program.txt"):
     return test_program     
 
 def build_cpu(program_file="test_program.txt"):
-    """构建RV32I CPU系统"""
+    """构建RV32I CPU系统 - 包含BTB分支预测器"""
     sys = SysBuilder('rv32i_cpu')
     with sys:
         # 创建单独的流水线寄存器，每个寄存器使用适合的宽度
@@ -546,6 +705,7 @@ def build_cpu(program_file="test_program.txt"):
         if_id_pc = RegArray(UInt(XLEN), 1, initializer=[0])           # PC (32位)
         if_id_instruction = RegArray(UInt(XLEN), 1, initializer=[0])  # 指令 (32位)
         if_id_valid = RegArray(UInt(1), 1, initializer=[1])            # 有效标志 (1位)
+        if_id_prediction_info = RegArray(UInt(PREDICTION_INFO_LEN), 1, initializer=[0])  # 预测信息 (34位)
 
         # ID/EX阶段寄存器
         id_ex_pc = RegArray(UInt(XLEN), 1, initializer=[0])           # PC (32位)
@@ -556,6 +716,7 @@ def build_cpu(program_file="test_program.txt"):
         id_ex_immediate = RegArray(UInt(XLEN), 1, initializer=[0])    # 立即数 (32位)
         id_ex_need_rs1 = RegArray(UInt(1), 1, initializer=[0])        # 是否需要rs1 (1位)
         id_ex_need_rs2 = RegArray(UInt(1), 1, initializer=[0])        # 是否需要rs2 (1位)
+        id_ex_prediction_info = RegArray(UInt(PREDICTION_INFO_LEN), 1, initializer=[0])  # 预测信息 (34位)
 
         # EX/MEM阶段寄存器
         ex_mem_pc = RegArray(UInt(XLEN), 1, initializer=[0])           # PC (32位)
@@ -569,6 +730,11 @@ def build_cpu(program_file="test_program.txt"):
         mem_wb_valid = RegArray(UInt(1), 1, initializer=[1])            # 有效标志 (1位)
         mem_wb_mem_data = RegArray(UInt(XLEN), 1, initializer=[0])     # 内存数据 (32位)
         mem_wb_ex_result = RegArray(UInt(XLEN), 1, initializer=[0])     # EX阶段结果 (32位)
+
+        # 分支预测器 - BTB + BHT + 有效位
+        btb = RegArray(UInt(XLEN), BTB_SIZE, initializer=[0]*BTB_SIZE)        # Branch Target Buffer (32位 x 64)
+        bht = RegArray(UInt(2), BTB_SIZE, initializer=[1]*BTB_SIZE)           # 2-bit饱和计数器 (初始化为01=Weakly Not Taken)
+        btb_valid = RegArray(UInt(1), BTB_SIZE, initializer=[0]*BTB_SIZE)     # BTB有效位
 
         # 创建指令内存
         test_program = init_memory(program_file)
@@ -592,10 +758,10 @@ def build_cpu(program_file="test_program.txt"):
         # 按照流水线顺序构建模块
         writeback_signals = writeback_stage.build(mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, mem_wb_control, reg_file, data_sram)
         memory_signals = memory_stage.build(ex_mem_valid, ex_mem_result, ex_mem_pc, ex_mem_data, ex_mem_control, mem_wb_control, mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, writeback_stage, data_sram)
-        execute_signals = execute_stage.build(id_ex_valid, id_ex_pc, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_control, ex_mem_pc, ex_mem_control, ex_mem_valid, ex_mem_result, ex_mem_data, reg_file, memory_stage)
-        decode_signals = decode_stage.build(if_id_valid, if_id_pc, if_id_instruction, id_ex_pc, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_need_rs1, id_ex_need_rs2, reg_file, execute_stage)
-        fetch_signals = fetch_stage.build(pc, stall, if_id_pc, if_id_instruction, if_id_valid, instruction_memory, decode_stage)
-        hazard_unit.build(pc, stall, if_id_valid, if_id_instruction, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, ex_mem_valid, mem_wb_valid, fetch_signals, decode_signals, execute_signals, memory_signals, writeback_signals)
+        execute_signals = execute_stage.build(id_ex_valid, id_ex_pc, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_control, id_ex_prediction_info, ex_mem_pc, ex_mem_control, ex_mem_valid, ex_mem_result, ex_mem_data, reg_file, memory_stage)
+        decode_signals = decode_stage.build(if_id_valid, if_id_pc, if_id_instruction, if_id_prediction_info, id_ex_pc, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_need_rs1, id_ex_need_rs2, id_ex_prediction_info, reg_file, execute_stage)
+        fetch_signals = fetch_stage.build(pc, stall, if_id_pc, if_id_instruction, if_id_valid, if_id_prediction_info, instruction_memory, btb, bht, btb_valid, decode_stage)
+        hazard_unit.build(pc, stall, if_id_valid, if_id_instruction, if_id_prediction_info, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_prediction_info, ex_mem_valid, mem_wb_valid, btb, bht, btb_valid, fetch_signals, decode_signals, execute_signals, memory_signals, writeback_signals)
         
         # 构建Driver模块，处理PC更新
         driver.build(fetch_stage)
