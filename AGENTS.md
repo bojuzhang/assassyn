@@ -900,6 +900,8 @@ apptainer exec ./assassyn.sif python ./rv32i_cpu.py
 
 **程序所有日志的输出在 reslut.out 中，直接输出的为运行是否正确的信息**
 
+**禁止通过任何方式向 result.out 中写入内容**
+
 ### 调试技巧
 
 1. **使用日志输出**:

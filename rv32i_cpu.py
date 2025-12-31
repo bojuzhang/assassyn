@@ -100,20 +100,20 @@ class FetchStage(Module):
         ).bitcast(UInt(PREDICTION_INFO_LEN))
 
         # IF/ID 寄存器更新:
-        # - 暂停时(stall=1): 保持不变
+        # - 暂停时(stall=1): 清零
         # - 正常时: 更新为当前取的指令
         with Condition(if_id_valid[0]):
-            if_id_pc[0] = stall[0].select(if_id_pc[0], current_pc)
-            # if_id_valid 应该在正常情况下保持为1，只有 need_flush 时才清0（由 HazardUnit 处理）
-            if_id_prediction_info[0] = stall[0].select(if_id_prediction_info[0], prediction_info)
+            if_id_pc[0] = stall[0].select(UInt(XLEN)(0), current_pc)
+            if_id_valid[0] = stall[0].select(UInt(1)(0), UInt(1)(1))
+            if_id_prediction_info[0] = stall[0].select(UInt(PREDICTION_INFO_LEN)(0), prediction_info)
 
         decode_stage.async_called()
 
         # fetch_signals 逻辑:
-        # - 正常情况(stall=0, if_id_valid=1): 输出当前取的指令
-        # - 暂停情况(stall=1): 输出 if_id_instruction[0] (保持当前指令)
-        # - 刷新情况(if_id_valid=0): 输出 if_id_instruction[0] (使用存储的指令)
-        fetch_signals = stall[0].select(if_id_instruction[0], if_id_valid[0].select(instruction, if_id_instruction[0])).bitcast(Bits(XLEN))
+        # - if_id_valid=1, stall=0: 输出当前取的指令
+        # - if_id_valid=1, stall=1: 输出 0 (NOP)
+        # - if_id_valid=0: 输出 if_id_instruction[0] (使用存储的指令)
+        fetch_signals = if_id_valid[0].select(stall[0].select(UInt(XLEN)(0), instruction), if_id_instruction[0]).bitcast(Bits(XLEN))
         return fetch_signals
 
 # ==================== ID阶段：指令解码 ===================
@@ -1027,9 +1027,8 @@ class HazardUnit(Downstream):
         # - data_hazard时，EX阶段指令仍然有效（只是IF/ID暂停），保持为1
         # 但是！如果是因为mul_executing导致的data_hazard，说明乘法正在执行，
         # 此时我们不应该再次启动乘法，所以对于新指令的启动检查应该用额外的信号
-        id_ex_valid[0] = (~need_flush)
-        # if_id_valid控制是否接受新指令到ID阶段
-        if_id_valid[0] = (~data_hazard & ~need_flush)
+        id_ex_valid[0] = (~data_hazard)
+        if_id_valid[0] = (~data_hazard)
         ex_mem_valid[0] = UInt(1)(1)
         mem_wb_valid[0] = UInt(1)(1)
         stall[0] = data_hazard
@@ -1079,50 +1078,23 @@ class HazardUnit(Downstream):
         # 分支误预测时使用correct_pc
         flush_pc = is_jumpr_ex.select(target_pc, is_jump_ex.select(actual_target_pc, correct_pc))
         
-        # 关键修复：当上一个周期是 flush 时 (if_id_valid[0]=0)，
-        # 当前周期 IF 阶段正在取新指令，不应该更新 PC
-        # 只有当 if_id_valid[0]=1 时才正常更新 PC
-        if_id_valid_current = if_id_valid[0]  # 上一个周期的 if_id_valid 值
-        
-        # DEBUG: 检查 flush_pc 和 target_pc
-        # log("HAZARD PC: is_jumpr_ex={}, target_pc={}, correct_pc={}, flush_pc={}, need_flush={}, if_id_valid_current={}",
-        #     is_jumpr_ex, target_pc, correct_pc, flush_pc, need_flush, if_id_valid_current)
-        
-        # PC 更新逻辑：
-        # - need_flush=1: 跳转到 flush_pc
-        # - need_flush=0 且 if_id_valid_current=0: 保持 PC 不变（上一周期刚 flush，正在取指令）
-        # - need_flush=0 且 if_id_valid_current=1 且 data_hazard=1: 保持 PC 不变（暂停）
-        # - need_flush=0 且 if_id_valid_current=1 且 data_hazard=0: PC = normal_next_pc
-        pc_hold_after_flush = (~if_id_valid_current & ~need_flush).select(pc[0], normal_next_pc)
-        pc_with_hazard = data_hazard.select(pc[0], pc_hold_after_flush)
-        pc[0] = need_flush.select(flush_pc, pc_with_hazard)
-        # log("HAZARD PC RESULT: pc[0]={}", pc[0])
+        # PC更新
+        # JALR时使用target_pc (因为在EX阶段已经计算为 (rs1 + imm) & ~1)
+        flush_pc = is_jumpr_ex.select(target_pc, is_jump_ex.select(actual_target_pc, correct_pc))
+        pc[0] = need_flush.select(flush_pc, data_hazard.select(pc[0], normal_next_pc))
         
         # 流水线刷新 (根据branch_prediction_rules.md)
         # IF/ID阶段刷新: if_id_valid[0] = 0, if_id_pc[0] = 0, if_id_instruction[0] = NOP
         # ID/EX阶段刷新: 清空所有寄存器
-        
-        # IF/ID 寄存器更新逻辑:
-        # - need_flush=1: 写入NOP
-        # - data_hazard=1: 保持当前指令（暂停，等待冒险解决）
-        # - 正常情况: 写入新指令
-        with Condition(~data_hazard):
-            # 只有在不暂停时才更新 IF/ID 指令寄存器
+        with Condition(if_id_valid[0]):
             if_id_instruction[0] = need_flush.select(UInt(XLEN)(0x00000013), instruction)  # NOP指令
             if_id_prediction_info[0] = need_flush.select(UInt(PREDICTION_INFO_LEN)(0), prediction_info_id)
-        
-        # ID/EX 寄存器更新逻辑:
-        # - need_flush=1: 清空（写入NOP）
-        # - data_hazard=1: 插入气泡（NOP），ID阶段指令等待冒险解决
-        # - 正常情况: 更新为新指令
         with Condition(id_ex_valid[0]):
-            # 当刷新或暂停时清空，否则更新为新指令
-            should_insert_nop = (need_flush | data_hazard).select(UInt(1)(1), UInt(1)(0))
-            id_ex_control[0] = should_insert_nop.select(nop_control, control_in)
-            id_ex_immediate[0] = should_insert_nop.select(UInt(XLEN)(0), immediate)
-            id_ex_rs1_idx[0] = should_insert_nop.select(UInt(5)(0), rs1)
-            id_ex_rs2_idx[0] = should_insert_nop.select(UInt(5)(0), rs2)
-            id_ex_prediction_info[0] = should_insert_nop.select(UInt(PREDICTION_INFO_LEN)(0), prediction_info_id)
+            id_ex_control[0] = need_flush.select(nop_control, control_in)
+            id_ex_immediate[0] = need_flush.select(UInt(XLEN)(0), immediate)
+            id_ex_rs1_idx[0] = need_flush.select(UInt(5)(0), rs1)
+            id_ex_rs2_idx[0] = need_flush.select(UInt(5)(0), rs2)
+            id_ex_prediction_info[0] = need_flush.select(UInt(PREDICTION_INFO_LEN)(0), prediction_info_id)
 
 # ==================== 顶层CPU模块 ===================
 class Driver(Module):
