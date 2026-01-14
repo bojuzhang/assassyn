@@ -158,6 +158,7 @@ class FetchStage(Module):
             if_id_pc[0] = stall[0].select(UInt(XLEN)(0), current_pc)
             if_id_valid[0] = stall[0].select(UInt(1)(0), UInt(1)(1))
             if_id_prediction_info[0] = stall[0].select(UInt(PREDICTION_INFO_LEN)(0), prediction_info)
+            log("IF: PC={:08x}, Instruction={:08x}", current_pc, instruction)
 
         decode_stage.async_called()
 
@@ -180,7 +181,7 @@ class DecodeStage(Module):
         instruction = if_id_instruction[0]
         prediction_info_in = if_id_prediction_info[0]
 
-        # log("Instruction={:08x}", instruction)
+        log("ID: PC={:08x}, Instruction={:08x}", if_id_pc_in, instruction)
         
         # 如果指令无效，直接返回，不更新ID/EX寄存器
         opcode = instruction[0:6]          # bits 6:0
@@ -991,8 +992,8 @@ class ExecuteStage(Module):
         # 优先级：div_done > mul_done > normal_alu_result
         div_result_val = div_result_reg[0]
         alu_result = div_done.select(div_result_val, mul_done.select(current_mul_result, normal_alu_result))
-        # log("EX RESULT: mul_done={}, div_done={}, div_result_val={}, alu_result={}", 
-        #     mul_done, div_done, div_result_val, alu_result)
+        log("EX RESULT: PC={:08x}, alu_op={:05b}, alu_a={:08x}, alu_b={:08x}, normal_alu_result={:08x}, final_alu_result={:08x}",
+            pc_in, alu_op, alu_a, alu_b, normal_alu_result, alu_result)
         
         target_pc = (is_branch | is_jump).select(actual_target_pc, target_pc)
         target_pc = is_jumpr.select(new_pc.bitcast(UInt(32)), target_pc)
@@ -1123,108 +1124,143 @@ class MemoryStage(Module):
         data_in = ex_mem_data[0]
         control_in = ex_mem_control[0]
         
-        # 如果指令无效，直接返回，不更新MEM/WB寄存器
         # 解析控制信号
         mem_read = control_in[5:5]
         mem_write = control_in[6:6]
         store_type = control_in[22:23]  # 存储类型: 00=SB, 01=SH, 10=SW
         
-        # 默认输出
-        mem_data = UInt(XLEN)(0)
-        
         word_addr = addr_in >> UInt(XLEN)(2)
-        byte_offset = addr_in[0:1]  # 地址低2位，用于字节/半字偏移
+        byte_offset = addr_in[0:1]  # 地址低2位
         
-        # SB/SH需要读-修改-写操作
+        # DEBUG: Log memory operations
+        with Condition(mem_read & ex_mem_valid[0]):
+            log("MEM READ: addr={:08x}, word_addr={:08x}, byte_offset={}", addr_in, word_addr, byte_offset)
+        with Condition(mem_write & ex_mem_valid[0]):
+            log("MEM WRITE: addr={:08x}, word_addr={:08x}, byte_offset={}, data={:08x}", addr_in, word_addr, byte_offset, data_in)
+        
         # store_type: 00=SB, 01=SH, 10=SW
         is_sb = (store_type == UInt(2)(0b00))
         is_sh = (store_type == UInt(2)(0b01))
         is_sw = (store_type == UInt(2)(0b10))
+        needs_rmw = mem_write & (is_sb | is_sh)  # 需要读-修改-写
         
-        # 对于SB/SH，需要先读取原始数据，然后修改对应字节
-        # 准备写入的数据（根据store类型和偏移）
-        data_byte = data_in[0:7]   # 要写入的字节
-        data_half = data_in[0:15]  # 要写入的半字
+        # 准备写入的数据
+        data_byte = data_in[0:7]
+        data_half = data_in[0:15]
         
-        # 构建SB的写入掩码和数据
-        # byte_offset=0: 写入bits[7:0]
-        # byte_offset=1: 写入bits[15:8]
-        # byte_offset=2: 写入bits[23:16]
-        # byte_offset=3: 写入bits[31:24]
-        sb_data = (byte_offset == UInt(2)(0)).select(
-            concat(UInt(24)(0), data_byte),
-            (byte_offset == UInt(2)(1)).select(
-                concat(UInt(16)(0), data_byte, UInt(8)(0)),
-                (byte_offset == UInt(2)(2)).select(
-                    concat(UInt(8)(0), data_byte, UInt(16)(0)),
-                    concat(data_byte, UInt(24)(0))
+        # SB/SH状态机: 0=IDLE, 1=READ(等待读取完成), 2=WRITE(写回)
+        # SB/SH状态机: 0=IDLE, 2=WRITE (状态1未使用)
+        current_state = sb_sh_state[0]
+        is_idle = (current_state == UInt(2)(0))
+        is_write_phase = (current_state == UInt(2)(2))
+        
+        # 使用保存的地址和数据（用于WRITE阶段）
+        saved_addr = sb_sh_addr[0]
+        saved_data = sb_sh_data[0]
+        saved_type = sb_sh_type[0]
+        saved_word_addr = saved_addr >> UInt(XLEN)(2)
+        saved_byte_offset = saved_addr[0:1]
+        saved_data_byte = saved_data[0:7]
+        saved_data_half = saved_data[0:15]
+        
+        # 构建SB的写入数据和掩码（使用保存的值）
+        sb_data_saved = (saved_byte_offset == UInt(2)(0)).select(
+            concat(UInt(24)(0), saved_data_byte),
+            (saved_byte_offset == UInt(2)(1)).select(
+                concat(UInt(16)(0), saved_data_byte, UInt(8)(0)),
+                (saved_byte_offset == UInt(2)(2)).select(
+                    concat(UInt(8)(0), saved_data_byte, UInt(16)(0)),
+                    concat(saved_data_byte, UInt(24)(0))
                 )
             )
         ).bitcast(UInt(XLEN))
         
-        sb_mask = (byte_offset == UInt(2)(0)).select(
+        sb_mask_saved = (saved_byte_offset == UInt(2)(0)).select(
             UInt(XLEN)(0xFFFFFF00),
-            (byte_offset == UInt(2)(1)).select(
+            (saved_byte_offset == UInt(2)(1)).select(
                 UInt(XLEN)(0xFFFF00FF),
-                (byte_offset == UInt(2)(2)).select(
+                (saved_byte_offset == UInt(2)(2)).select(
                     UInt(XLEN)(0xFF00FFFF),
                     UInt(XLEN)(0x00FFFFFF)
                 )
             )
         )
         
-        # 构建SH的写入数据
-        # byte_offset[1]=0: 写入bits[15:0]
-        # byte_offset[1]=1: 写入bits[31:16]
-        sh_data = (byte_offset[1:1] == UInt(1)(0)).select(
-            concat(UInt(16)(0), data_half),
-            concat(data_half, UInt(16)(0))
+        sh_data_saved = (saved_byte_offset[1:1] == UInt(1)(0)).select(
+            concat(UInt(16)(0), saved_data_half),
+            concat(saved_data_half, UInt(16)(0))
         ).bitcast(UInt(XLEN))
         
-        sh_mask = (byte_offset[1:1] == UInt(1)(0)).select(
+        sh_mask_saved = (saved_byte_offset[1:1] == UInt(1)(0)).select(
             UInt(XLEN)(0xFFFF0000),
             UInt(XLEN)(0x0000FFFF)
         )
         
-        # 根据store类型选择最终写入数据
-        # 对于SB/SH，需要与原始数据合并
-        write_data = data_in  # 默认SW
-
+        # 输出SB/SH是否正在进行中（用于stall信号）
+        # 需要在两个时刻stall：
+        # 1. IDLE状态检测到SB/SH指令时（当前周期发起读取，下周期要写入）
+        # 2. WRITE状态时（正在进行写入操作）
+        sb_sh_active = is_write_phase | (is_idle & ex_mem_valid[0] & needs_rmw)
+        
         with Condition(mem_wb_valid[0]):
-            with Condition(mem_read | mem_write):
-                with Condition(ex_mem_valid[0]):
-                    # 对于SB/SH，先读取原始数据
-                    with Condition(mem_write & (is_sb | is_sh)):
-                        # 读取原始数据
-                        data_sram.build(we=UInt(1)(0), re=UInt(1)(1), addr=word_addr, wdata=UInt(XLEN)(0))
-                        original_data = data_sram.dout[0]
-                        # 合并数据
-                        merged_sb = (original_data & sb_mask) | sb_data
-                        merged_sh = (original_data & sh_mask) | sh_data
-                        final_write_data = is_sb.select(merged_sb, is_sh.select(merged_sh, data_in))
-                        # 写入修改后的数据
-                        data_sram.build(we=UInt(1)(1), re=UInt(1)(0), addr=word_addr, wdata=final_write_data)
-                    with Condition(mem_write & is_sw):
-                        # SW直接写入整个字
-                        data_sram.build(we=UInt(1)(1), re=UInt(1)(0), addr=word_addr, wdata=data_in)
-                    with Condition(mem_read & ~mem_write):
-                        # 纯读取操作
-                        data_sram.build(we=UInt(1)(0), re=UInt(1)(1), addr=word_addr, wdata=UInt(XLEN)(0))
-                    mem_wb_mem_data[0] = data_sram.dout[0]          # 内存读取的数据
-                with Condition(~ex_mem_valid[0]):
-                    mem_wb_mem_data[0] = UInt(XLEN)(0)
-            mem_wb_control[0] = ex_mem_valid[0].select(control_in, UInt(CONTROL_LEN)(0))
-            # mem_wb_valid[0] = ex_mem_valid[0].select(UInt(1)(1), UInt(1)(0))
-            mem_wb_ex_result[0] = ex_mem_valid[0].select(ex_mem_result[0], UInt(XLEN)(0))
-            mem_wb_addr[0] = ex_mem_valid[0].select(addr_in, UInt(XLEN)(0))
+            # ===== WRITE阶段：使用上周期读取的数据进行写入 =====
+            with Condition(is_write_phase):
+                # 获取上周期读取的原始数据
+                original_data = data_sram.dout[0]
+                # 合并数据
+                is_sb_saved = (saved_type == UInt(2)(0b00))
+                merged_sb = (original_data & sb_mask_saved) | sb_data_saved
+                merged_sh = (original_data & sh_mask_saved) | sh_data_saved
+                final_write_data = is_sb_saved.select(merged_sb, merged_sh)
+                # 写入
+                data_sram.build(we=UInt(1)(1), re=UInt(1)(0), addr=saved_word_addr, wdata=final_write_data)
+                # 返回IDLE状态
+                sb_sh_state[0] = UInt(2)(0)
             
-            # log("MEM: PC={}, Addr={:08x}, Read={}, Write={}, data_in={}, data_out={}",
-            #     pc_in, addr_in, mem_read, mem_write, data_in, data_sram.dout[0])
-
+            # ===== 正常操作（IDLE状态）=====
+            with Condition(is_idle & ex_mem_valid[0]):
+                with Condition(needs_rmw):
+                    # SB/SH: 开始READ阶段
+                    data_sram.build(we=UInt(1)(0), re=UInt(1)(1), addr=word_addr, wdata=UInt(XLEN)(0))
+                    # 保存当前指令信息
+                    sb_sh_addr[0] = addr_in
+                    sb_sh_data[0] = data_in
+                    sb_sh_type[0] = store_type
+                    # 进入WRITE阶段（下周期写入）
+                    sb_sh_state[0] = UInt(2)(2)
+                
+                with Condition(mem_write & is_sw):
+                    # SW: 直接写入
+                    data_sram.build(we=UInt(1)(1), re=UInt(1)(0), addr=word_addr, wdata=data_in)
+                    log("MEM WRITE SW: word_addr={:08x}, wdata={:08x}", word_addr, data_in)
+                
+                with Condition(mem_read & ~mem_write):
+                    # Load: 读取
+                    data_sram.build(we=UInt(1)(0), re=UInt(1)(1), addr=word_addr, wdata=UInt(XLEN)(0))
+                    log("MEM READ SRAM: word_addr={:08x}, dout={:08x}", word_addr, data_sram.dout[0])
+                
+                mem_wb_mem_data[0] = data_sram.dout[0]
+                log("MEM UPDATE: mem_wb_mem_data={:08x}", mem_wb_mem_data[0])
+            
+            with Condition(is_idle & ~ex_mem_valid[0]):
+                mem_wb_mem_data[0] = UInt(XLEN)(0)
+            
+            # 更新MEM/WB流水线寄存器（仅在IDLE状态且不是SB/SH开始时）
+            with Condition((is_idle & ~needs_rmw) | is_write_phase):
+                mem_wb_control[0] = ex_mem_valid[0].select(control_in, UInt(CONTROL_LEN)(0))
+                mem_wb_ex_result[0] = ex_mem_valid[0].select(ex_mem_result[0], UInt(XLEN)(0))
+                mem_wb_addr[0] = ex_mem_valid[0].select(addr_in, UInt(XLEN)(0))
+            
+            # SB/SH期间保持MEM/WB寄存器
+            with Condition(is_idle & needs_rmw):
+                mem_wb_control[0] = UInt(CONTROL_LEN)(0)  # 不写回寄存器
+                mem_wb_ex_result[0] = UInt(XLEN)(0)
+                mem_wb_addr[0] = UInt(XLEN)(0)
 
         writeback_stage.async_called()
 
-        memory_signals = control_in.bitcast(Bits(CONTROL_LEN))
+        # 返回memory_signals，包含sb_sh_active用于stall
+        memory_signals = concat(sb_sh_active, control_in).bitcast(Bits(CONTROL_LEN + 1))
         return memory_signals
 
 # ==================== WB阶段：写回 ===================
@@ -1297,18 +1333,21 @@ class WriteBackStage(Module):
                              (load_type == UInt(3)(0b010)).select(lw_data,   # LW
                              (load_type == UInt(3)(0b100)).select(lbu_data,  # LBU
                              lhu_data))))                                    # LHU (101)
+        
+        log("WB LOAD PROCESS: mem_data_in={:08x}, load_type={:03b}, processed_mem_data={:08x}",
+            mem_data_in, load_type, processed_mem_data)
             
         # 选择写回数据
         wb_data = mem_to_reg.select(processed_mem_data, ex_result_in)
         
-        # log("WB STAGE: ex_result_in={}, mem_to_reg={}, wb_data={}, wb_rd={}, reg_write={}", 
-            # ex_result_in, mem_to_reg, wb_data, wb_rd, reg_write)
+        log("WB STAGE: ex_result_in={:08x}, mem_to_reg={}, wb_data={:08x}, wb_rd={}, reg_write={}, load_type={:03b}",
+            ex_result_in, mem_to_reg, wb_data, wb_rd, reg_write, load_type)
             
         # 如果指令无效，直接返回
         with Condition(mem_wb_valid[0]):
             with Condition(reg_write):
+                log("WB WRITE: reg[{}] = {:08x}", wb_rd, wb_data)
                 reg_file[wb_rd] = wb_data
-                # log("WB WRITE: reg[{}] = {}", wb_rd, wb_data)
             # log("WB: Write_Data={}, RD={}, WE={}",
             #     wb_data, wb_rd, reg_write)
             # success = (wb_data == UInt(XLEN)(5050))
@@ -1334,7 +1373,8 @@ class HazardUnit(Downstream):
         execute_signals = execute_signals.optional(Bits(EXECUTE_SIGNALS_LEN)(0))
         decode_signals = decode_signals.optional(Bits(DECODE_SIGNALS_LEN)(0))
         fetch_signals = fetch_signals.optional(Bits(XLEN)(0))
-        memory_signals = memory_signals.optional(Bits(CONTROL_LEN)(0))
+        MEMORY_SIGNALS_LEN = CONTROL_LEN + 1  # control + sb_sh_active
+        memory_signals = memory_signals.optional(Bits(MEMORY_SIGNALS_LEN)(0))
         writeback_signals = writeback_signals.optional(Bits(CONTROL_LEN)(0))
 
         # 解析execute_signals
@@ -1389,8 +1429,10 @@ class HazardUnit(Downstream):
         reg_write_mem = memory_control[7:7]
         mem_read_mem = memory_control[5:5]  # 解析 mem_read 信号用于检测 Load-Use 冒险
         
-        wb_control = memory_signals.bitcast(UInt(CONTROL_LEN))
-        wb_control = ex_mem_valid[0].select(wb_control, UInt(CONTROL_LEN)(0))
+        # 解析memory_signals: [0:CONTROL_LEN-1] = control, [CONTROL_LEN] = sb_sh_active
+        mem_sig_control = memory_signals[0:CONTROL_LEN-1].bitcast(UInt(CONTROL_LEN))
+        sb_sh_stall = memory_signals[CONTROL_LEN:CONTROL_LEN].bitcast(UInt(1))
+        wb_control = ex_mem_valid[0].select(mem_sig_control, UInt(CONTROL_LEN)(0))
         rd_wb = wb_control[25:29]
         reg_write_wb = wb_control[7:7]
         mem_read_wb = wb_control[5:5]  # WB 阶段的 mem_read 信号
@@ -1450,7 +1492,7 @@ class HazardUnit(Downstream):
         # 3. 乘法结果冒险（下一条指令依赖乘法结果）
         # 4. 除法器执行中（state != 0，需要等待除法完成）
         # 5. 除法结果冒险（下一条指令依赖除法结果）
-        data_hazard = ((load_use_hazard_mem | mul_executing | mul_result_hazard | div_executing | div_result_hazard) & ~need_flush)
+        data_hazard = ((load_use_hazard_mem | mul_executing | mul_result_hazard | div_executing | div_result_hazard | sb_sh_stall) & ~need_flush)
         # log("HAZARD2: data_hazard={}, need_flush={}, mul_executing={}, mul_result_hazard={}, div_executing={}, div_result_hazard={}",
         #     data_hazard, need_flush, mul_executing, mul_result_hazard, div_executing, div_result_hazard)
         
@@ -1461,7 +1503,8 @@ class HazardUnit(Downstream):
         # 此时我们不应该再次启动乘法，所以对于新指令的启动检查应该用额外的信号
         id_ex_valid[0] = (~data_hazard)
         if_id_valid[0] = (~data_hazard)
-        ex_mem_valid[0] = UInt(1)(1)
+        # ex_mem_valid: SB/SH stall时设为0，其他情况由正常流水线控制（默认1，flush时为0）
+        ex_mem_valid[0] = (~sb_sh_stall)
         mem_wb_valid[0] = UInt(1)(1)
         stall[0] = data_hazard
         nop_control = UInt(CONTROL_LEN)(0)
