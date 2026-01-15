@@ -1,0 +1,68 @@
+
+test.elf:     file format elf32-littleriscv
+
+
+Disassembly of section .text:
+
+00000000 <_start>:
+   0:	00004137          	lui	sp,0x4
+   4:	00000097          	auipc	ra,0x0
+   8:	00c080e7          	jalr	12(ra) # 10 <main>
+
+0000000c <loop>:
+   c:	0000006f          	j	c <loop>
+
+00000010 <main>:
+  10:	fd010113          	addi	sp,sp,-48 # 3fd0 <main+0x3fc0>
+  14:	02812623          	sw	s0,44(sp)
+  18:	03010413          	addi	s0,sp,48
+  1c:	123457b7          	lui	a5,0x12345
+  20:	67878793          	addi	a5,a5,1656 # 12345678 <main+0x12345668>
+  24:	fcf42a23          	sw	a5,-44(s0)
+  28:	fd440793          	addi	a5,s0,-44
+  2c:	fef42423          	sw	a5,-24(s0)
+  30:	fe042623          	sw	zero,-20(s0)
+  34:	fe842783          	lw	a5,-24(s0)
+  38:	0007c783          	lbu	a5,0(a5)
+  3c:	fef403a3          	sb	a5,-25(s0)
+  40:	fe744703          	lbu	a4,-25(s0)
+  44:	07800793          	li	a5,120
+  48:	00f71863          	bne	a4,a5,58 <main+0x48>
+  4c:	fec42783          	lw	a5,-20(s0)
+  50:	00178793          	addi	a5,a5,1
+  54:	fef42623          	sw	a5,-20(s0)
+  58:	fe842783          	lw	a5,-24(s0)
+  5c:	0017c783          	lbu	a5,1(a5)
+  60:	fef40323          	sb	a5,-26(s0)
+  64:	fe644703          	lbu	a4,-26(s0)
+  68:	05600793          	li	a5,86
+  6c:	00f71863          	bne	a4,a5,7c <main+0x6c>
+  70:	fec42783          	lw	a5,-20(s0)
+  74:	00278793          	addi	a5,a5,2
+  78:	fef42623          	sw	a5,-20(s0)
+  7c:	fd440793          	addi	a5,s0,-44
+  80:	fef42023          	sw	a5,-32(s0)
+  84:	fe042783          	lw	a5,-32(s0)
+  88:	0007d783          	lhu	a5,0(a5)
+  8c:	fcf41f23          	sh	a5,-34(s0)
+  90:	fde45703          	lhu	a4,-34(s0)
+  94:	000057b7          	lui	a5,0x5
+  98:	67878793          	addi	a5,a5,1656 # 5678 <main+0x5668>
+  9c:	00f71863          	bne	a4,a5,ac <main+0x9c>
+  a0:	fec42783          	lw	a5,-20(s0)
+  a4:	00478793          	addi	a5,a5,4
+  a8:	fef42623          	sw	a5,-20(s0)
+  ac:	fd442783          	lw	a5,-44(s0)
+  b0:	fcf42c23          	sw	a5,-40(s0)
+  b4:	fd842703          	lw	a4,-40(s0)
+  b8:	123457b7          	lui	a5,0x12345
+  bc:	67878793          	addi	a5,a5,1656 # 12345678 <main+0x12345668>
+  c0:	00f71863          	bne	a4,a5,d0 <main+0xc0>
+  c4:	fec42783          	lw	a5,-20(s0)
+  c8:	00878793          	addi	a5,a5,8
+  cc:	fef42623          	sw	a5,-20(s0)
+  d0:	fec42783          	lw	a5,-20(s0)
+  d4:	00078513          	mv	a0,a5
+  d8:	02c12403          	lw	s0,44(sp)
+  dc:	03010113          	addi	sp,sp,48
+  e0:	00008067          	ret
