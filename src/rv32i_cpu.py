@@ -112,7 +112,6 @@ DIV_OP_REMU = 0b100
 # - FINAL_CORRECTION: 最终修正
 # - DONE: 完成
 
-# ==================== IF阶段：指令获取 ===================
 class FetchStage(Module):
     """指令获取阶段(IF) - 包含BTB预测逻辑"""
     def __init__(self):
@@ -500,7 +499,7 @@ class ExecuteStage(Module):
         return taken
 
     @module.combinational
-    def build(self, id_ex_valid, id_ex_pc, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_control, id_ex_prediction_info, ex_mem_pc, ex_mem_control, ex_mem_valid, ex_mem_result, ex_mem_data, reg_file, memory_stage, mem_wb_control, mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, data_sram, mul_a, mul_b, mul_op_reg, mul_start, mul_cycle_counter, mul_stage1_sum, mul_stage1_carry, mul_stage2_sum, mul_stage2_carry, mul_valid, mul_result_reg, mul_in_progress, mul_rd_reg, mul_control_reg, mul_pc_reg, div_dividend, div_divisor, div_op_reg, div_state, div_remainder, div_quotient, div_iter_count, div_sign, div_neg_result, div_valid, div_result_reg, div_rd_reg, div_control_reg, div_pc_reg):
+    def build(self, id_ex_valid, id_ex_pc, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_control, id_ex_prediction_info, ex_mem_pc, ex_mem_control, ex_mem_valid, ex_mem_result, ex_mem_data, reg_file, memory_stage, mem_wb_control, mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, data_sram, mem_wb_addr, mul_a, mul_b, mul_op_reg, mul_start, mul_cycle_counter, mul_stage1_sum, mul_stage1_carry, mul_stage2_sum, mul_stage2_carry, mul_valid, mul_result_reg, mul_in_progress, mul_rd_reg, mul_control_reg, mul_pc_reg, div_dividend, div_divisor, div_op_reg, div_state, div_remainder, div_quotient, div_iter_count, div_sign, div_neg_result, div_valid, div_result_reg, div_rd_reg, div_control_reg, div_pc_reg):
         pc_in = id_ex_pc[0]
         rs1_idx = id_ex_rs1_idx[0]
         rs2_idx = id_ex_rs2_idx[0]
@@ -525,7 +524,32 @@ class ExecuteStage(Module):
         wb_mem_to_reg = wb_control[8:8]   # mem_to_reg 在第8位
         wb_rd = wb_control[25:29]         # rd 在第25-29位
         wb_ex_result = mem_wb_ex_result[0]
-        wb_mem_data = data_sram.dout[0]   # 从 SRAM 读取的数据
+        # 从 SRAM 读取的数据，并根据load类型处理
+        wb_raw_mem_data = data_sram.dout[0]
+        wb_load_type = wb_control[14:16]  # load类型: 000=LB, 001=LH, 010=LW, 100=LBU, 101=LHU
+        wb_byte_offset = mem_wb_addr[0][0:1]  # 地址低2位
+        # 内联处理load数据 (ExecuteStage前递)
+        wb_byte0 = wb_raw_mem_data[0:7]
+        wb_byte1 = wb_raw_mem_data[8:15]
+        wb_byte2 = wb_raw_mem_data[16:23]
+        wb_byte3 = wb_raw_mem_data[24:31]
+        wb_selected_byte = (wb_byte_offset == UInt(2)(0)).select(wb_byte0,
+                           (wb_byte_offset == UInt(2)(1)).select(wb_byte1,
+                           (wb_byte_offset == UInt(2)(2)).select(wb_byte2, wb_byte3)))
+        wb_half0 = wb_raw_mem_data[0:15]
+        wb_half1 = wb_raw_mem_data[16:31]
+        wb_selected_half = (wb_byte_offset[1:1] == UInt(1)(0)).select(wb_half0, wb_half1)
+        wb_byte_sign = wb_selected_byte[7:7]
+        wb_lb_data = concat(wb_byte_sign.select(UInt(24)(0xFFFFFF), UInt(24)(0)), wb_selected_byte).bitcast(UInt(XLEN))
+        wb_lbu_data = concat(UInt(24)(0), wb_selected_byte).bitcast(UInt(XLEN))
+        wb_half_sign = wb_selected_half[15:15]
+        wb_lh_data = concat(wb_half_sign.select(UInt(16)(0xFFFF), UInt(16)(0)), wb_selected_half).bitcast(UInt(XLEN))
+        wb_lhu_data = concat(UInt(16)(0), wb_selected_half).bitcast(UInt(XLEN))
+        wb_lw_data = wb_raw_mem_data
+        wb_mem_data = (wb_load_type == UInt(3)(0b000)).select(wb_lb_data,
+                      (wb_load_type == UInt(3)(0b001)).select(wb_lh_data,
+                      (wb_load_type == UInt(3)(0b010)).select(wb_lw_data,
+                      (wb_load_type == UInt(3)(0b100)).select(wb_lbu_data, wb_lhu_data))))
         
         # WB 阶段数据选择：若 mem_to_reg=1 使用内存数据，否则使用 ALU 结果
         wb_data = wb_mem_to_reg.select(wb_mem_data, wb_ex_result)
@@ -1042,6 +1066,9 @@ class ExecuteStage(Module):
             # 乘法或除法完成时，使用保存的控制信息
             should_pass = id_ex_valid[0] & ~mul_wait & ~div_wait
             pass_or_done = should_pass | mul_done | div_done  # 要么正常传递，要么完成
+            log("EX PASS LOGIC: PC={:08x}, id_ex_valid={}, should_pass={}, mul_wait={}, div_wait={}, mul_done={}, div_done={}, pass_or_done={}",
+                pc_in,
+                id_ex_valid[0], should_pass, mul_wait, div_wait, mul_done, div_done, pass_or_done)
             
             # PC: 完成时用保存的 PC，否则用当前 PC
             final_pc = mul_done.select(mul_pc, div_done.select(div_pc, pc_in))
@@ -1052,6 +1079,7 @@ class ExecuteStage(Module):
             ex_mem_control[0] = pass_or_done.select(final_control, UInt(CONTROL_LEN)(0))
             ex_mem_result[0] = pass_or_done.select(alu_result, UInt(XLEN)(0))
             ex_mem_data[0] = pass_or_done.select(rs2_data, UInt(XLEN)(0))
+            log("EX DATA PATH: PC={:08x}, rs2_data={:08x}, pass_or_done={}, ex_mem_data={:08x}", pc_in, rs2_data, pass_or_done, ex_mem_data[0])
             
             # log("EX: PC={}, ALU_OP={:05b}, ALU_A={}, ALU_B={}, Result={:08x}, PC_Change={}, Target_PC={:08x}, Immediate={:08x}, ALU_SRC={}",
             #     pc_in, alu_op, alu_a, alu_b, alu_result, pc_change, target_pc, immediate_in, alu_src)
@@ -1200,28 +1228,58 @@ class MemoryStage(Module):
         # 需要在两个时刻stall：
         # 1. IDLE状态检测到SB/SH指令时（当前周期发起读取，下周期要写入）
         # 2. WRITE状态时（正在进行写入操作）
-        sb_sh_active = is_write_phase | (is_idle & ex_mem_valid[0] & needs_rmw)
+        sb_sh_active = is_idle & ex_mem_valid[0] & needs_rmw
+        
+        # ===== 统一计算 SRAM 控制信号（只调用一次 build）=====
+        # 获取上周期读取的原始数据（用于RMW WRITE阶段）
+        original_data = data_sram.dout[0]
+        
+        # 计算RMW写入数据
+        is_sb_saved = (saved_type == UInt(2)(0b00))
+        merged_sb = (original_data & sb_mask_saved) | sb_data_saved
+        merged_sh = (original_data & sh_mask_saved) | sh_data_saved
+        rmw_write_data = is_sb_saved.select(merged_sb, merged_sh)
+        
+        # 确定操作类型
+        do_rmw_write = is_write_phase & mem_wb_valid[0]  # RMW WRITE阶段
+        do_rmw_read = is_idle & ex_mem_valid[0] & needs_rmw & mem_wb_valid[0]  # SB/SH开始读
+        do_sw_write = is_idle & ex_mem_valid[0] & mem_write & is_sw & mem_wb_valid[0]  # SW写入
+        do_load_read = is_idle & ex_mem_valid[0] & mem_read & ~mem_write & mem_wb_valid[0]  # Load读取
+        
+        # 计算最终的 SRAM 控制信号
+        # we: RMW WRITE 或 SW 写入时为1
+        sram_we = do_rmw_write | do_sw_write
+        # re: RMW READ 或 Load 读取时为1
+        sram_re = do_rmw_read | do_load_read
+        # addr: RMW WRITE用saved_word_addr，其他用word_addr
+        sram_addr = do_rmw_write.select(saved_word_addr, word_addr)
+        # wdata: RMW WRITE用rmw_write_data，SW用data_in
+        rmw_write_data_uint = rmw_write_data.bitcast(UInt(XLEN))
+        sram_wdata = do_rmw_write.select(rmw_write_data_uint, data_in)
+        
+        # 只调用一次 data_sram.build()
+        data_sram.build(we=sram_we, re=sram_re, addr=sram_addr, wdata=sram_wdata)
+        
+        # DEBUG logs
+        with Condition(do_rmw_write):
+            log("MEM RMW WRITE PHASE: original_data={:08x}, saved_data={:08x}", original_data, saved_data)
+            log("MEM RMW WRITE: addr={:08x}, wdata={:08x}", saved_word_addr, rmw_write_data)
+        with Condition(do_rmw_read):
+            log("MEM RMW READ: word_addr={:08x}", word_addr)
+        with Condition(do_sw_write):
+            log("MEM WRITE SW: word_addr={:08x}, wdata={:08x}", word_addr, data_in)
+        with Condition(do_load_read):
+            log("MEM READ SRAM: word_addr={:08x}", word_addr)
         
         with Condition(mem_wb_valid[0]):
-            # ===== WRITE阶段：使用上周期读取的数据进行写入 =====
+            # ===== WRITE阶段：更新状态机 =====
             with Condition(is_write_phase):
-                # 获取上周期读取的原始数据
-                original_data = data_sram.dout[0]
-                # 合并数据
-                is_sb_saved = (saved_type == UInt(2)(0b00))
-                merged_sb = (original_data & sb_mask_saved) | sb_data_saved
-                merged_sh = (original_data & sh_mask_saved) | sh_data_saved
-                final_write_data = is_sb_saved.select(merged_sb, merged_sh)
-                # 写入
-                data_sram.build(we=UInt(1)(1), re=UInt(1)(0), addr=saved_word_addr, wdata=final_write_data)
                 # 返回IDLE状态
                 sb_sh_state[0] = UInt(2)(0)
             
             # ===== 正常操作（IDLE状态）=====
             with Condition(is_idle & ex_mem_valid[0]):
                 with Condition(needs_rmw):
-                    # SB/SH: 开始READ阶段
-                    data_sram.build(we=UInt(1)(0), re=UInt(1)(1), addr=word_addr, wdata=UInt(XLEN)(0))
                     # 保存当前指令信息
                     sb_sh_addr[0] = addr_in
                     sb_sh_data[0] = data_in
@@ -1229,18 +1287,9 @@ class MemoryStage(Module):
                     # 进入WRITE阶段（下周期写入）
                     sb_sh_state[0] = UInt(2)(2)
                 
-                with Condition(mem_write & is_sw):
-                    # SW: 直接写入
-                    data_sram.build(we=UInt(1)(1), re=UInt(1)(0), addr=word_addr, wdata=data_in)
-                    log("MEM WRITE SW: word_addr={:08x}, wdata={:08x}", word_addr, data_in)
-                
-                with Condition(mem_read & ~mem_write):
-                    # Load: 读取
-                    data_sram.build(we=UInt(1)(0), re=UInt(1)(1), addr=word_addr, wdata=UInt(XLEN)(0))
-                    log("MEM READ SRAM: word_addr={:08x}, dout={:08x}", word_addr, data_sram.dout[0])
-                
                 mem_wb_mem_data[0] = data_sram.dout[0]
                 log("MEM UPDATE: mem_wb_mem_data={:08x}", mem_wb_mem_data[0])
+                log("MEM SRAM DOUT: data_sram.dout={:08x}", data_sram.dout[0])
             
             with Condition(is_idle & ~ex_mem_valid[0]):
                 mem_wb_mem_data[0] = UInt(XLEN)(0)
@@ -1285,54 +1334,29 @@ class WriteBackStage(Module):
         # 计算字节偏移 (地址的低2位)
         byte_offset = addr_in[0:1]  # 2位偏移
         
-        # 根据load类型处理内存数据
-        # mem_data_in 是32位字，需要根据load_type和byte_offset提取正确的字节/半字
-        
-        # 提取字节 (根据byte_offset)
-        byte0 = mem_data_in[0:7]    # 最低字节
-        byte1 = mem_data_in[8:15]
-        byte2 = mem_data_in[16:23]
-        byte3 = mem_data_in[24:31]  # 最高字节
-        
-        # 根据偏移选择字节
-        selected_byte = (byte_offset == UInt(2)(0)).select(byte0,
-                        (byte_offset == UInt(2)(1)).select(byte1,
-                        (byte_offset == UInt(2)(2)).select(byte2, byte3)))
-        
-        # 根据偏移选择半字
-        half0 = mem_data_in[0:15]   # 低半字
-        half1 = mem_data_in[16:31]  # 高半字
-        selected_half = (byte_offset[1:1] == UInt(1)(0)).select(half0, half1)
-        
-        # LB: 有符号字节扩展
-        byte_sign = selected_byte[7:7]  # 符号位
-        lb_data = concat(
-            byte_sign.select(UInt(24)(0xFFFFFF), UInt(24)(0)),
-            selected_byte
-        ).bitcast(UInt(XLEN))
-        
-        # LBU: 无符号字节扩展
-        lbu_data = concat(UInt(24)(0), selected_byte).bitcast(UInt(XLEN))
-        
-        # LH: 有符号半字扩展
-        half_sign = selected_half[15:15]  # 符号位
-        lh_data = concat(
-            half_sign.select(UInt(16)(0xFFFF), UInt(16)(0)),
-            selected_half
-        ).bitcast(UInt(XLEN))
-        
-        # LHU: 无符号半字扩展
-        lhu_data = concat(UInt(16)(0), selected_half).bitcast(UInt(XLEN))
-        
-        # LW: 完整字
-        lw_data = mem_data_in
-        
-        # 根据load_type选择最终数据
-        processed_mem_data = (load_type == UInt(3)(0b000)).select(lb_data,   # LB
-                             (load_type == UInt(3)(0b001)).select(lh_data,   # LH
-                             (load_type == UInt(3)(0b010)).select(lw_data,   # LW
-                             (load_type == UInt(3)(0b100)).select(lbu_data,  # LBU
-                             lhu_data))))                                    # LHU (101)
+        # 使用公共函数处理load数据
+        # 内联处理load数据 (WriteBackStage)
+        wbs_byte0 = mem_data_in[0:7]
+        wbs_byte1 = mem_data_in[8:15]
+        wbs_byte2 = mem_data_in[16:23]
+        wbs_byte3 = mem_data_in[24:31]
+        wbs_selected_byte = (byte_offset == UInt(2)(0)).select(wbs_byte0,
+                            (byte_offset == UInt(2)(1)).select(wbs_byte1,
+                            (byte_offset == UInt(2)(2)).select(wbs_byte2, wbs_byte3)))
+        wbs_half0 = mem_data_in[0:15]
+        wbs_half1 = mem_data_in[16:31]
+        wbs_selected_half = (byte_offset[1:1] == UInt(1)(0)).select(wbs_half0, wbs_half1)
+        wbs_byte_sign = wbs_selected_byte[7:7]
+        wbs_lb_data = concat(wbs_byte_sign.select(UInt(24)(0xFFFFFF), UInt(24)(0)), wbs_selected_byte).bitcast(UInt(XLEN))
+        wbs_lbu_data = concat(UInt(24)(0), wbs_selected_byte).bitcast(UInt(XLEN))
+        wbs_half_sign = wbs_selected_half[15:15]
+        wbs_lh_data = concat(wbs_half_sign.select(UInt(16)(0xFFFF), UInt(16)(0)), wbs_selected_half).bitcast(UInt(XLEN))
+        wbs_lhu_data = concat(UInt(16)(0), wbs_selected_half).bitcast(UInt(XLEN))
+        wbs_lw_data = mem_data_in
+        processed_mem_data = (load_type == UInt(3)(0b000)).select(wbs_lb_data,
+                             (load_type == UInt(3)(0b001)).select(wbs_lh_data,
+                             (load_type == UInt(3)(0b010)).select(wbs_lw_data,
+                             (load_type == UInt(3)(0b100)).select(wbs_lbu_data, wbs_lhu_data))))
         
         log("WB LOAD PROCESS: mem_data_in={:08x}, load_type={:03b}, processed_mem_data={:08x}",
             mem_data_in, load_type, processed_mem_data)
@@ -1348,11 +1372,6 @@ class WriteBackStage(Module):
             with Condition(reg_write):
                 log("WB WRITE: reg[{}] = {:08x}", wb_rd, wb_data)
                 reg_file[wb_rd] = wb_data
-            # log("WB: Write_Data={}, RD={}, WE={}",
-            #     wb_data, wb_rd, reg_write)
-            # success = (wb_data == UInt(XLEN)(5050))
-            # with Condition(success):
-            #     log("SUCCESSFUL!")
 
         writeback_signals = control_in.bitcast(Bits(CONTROL_LEN))
         return writeback_signals
@@ -1714,7 +1733,7 @@ def build_cpu(program_file="test_program.txt"):
         # 按照流水线顺序构建模块
         writeback_signals = writeback_stage.build(mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, mem_wb_control, mem_wb_addr, reg_file, data_sram)
         memory_signals = memory_stage.build(ex_mem_valid, ex_mem_result, ex_mem_pc, ex_mem_data, ex_mem_control, mem_wb_control, mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, mem_wb_addr, sb_sh_state, sb_sh_addr, sb_sh_data, sb_sh_type, writeback_stage, data_sram)
-        execute_signals = execute_stage.build(id_ex_valid, id_ex_pc, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_control, id_ex_prediction_info, ex_mem_pc, ex_mem_control, ex_mem_valid, ex_mem_result, ex_mem_data, reg_file, memory_stage, mem_wb_control, mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, data_sram, mul_a, mul_b, mul_op_reg, mul_start, mul_cycle_counter, mul_stage1_sum, mul_stage1_carry, mul_stage2_sum, mul_stage2_carry, mul_valid, mul_result_reg, mul_in_progress, mul_rd_reg, mul_control_reg, mul_pc_reg, div_dividend, div_divisor, div_op_reg, div_state, div_remainder, div_quotient, div_iter_count, div_sign, div_neg_result, div_valid, div_result_reg, div_rd_reg, div_control_reg, div_pc_reg)
+        execute_signals = execute_stage.build(id_ex_valid, id_ex_pc, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_control, id_ex_prediction_info, ex_mem_pc, ex_mem_control, ex_mem_valid, ex_mem_result, ex_mem_data, reg_file, memory_stage, mem_wb_control, mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, data_sram, mem_wb_addr, mul_a, mul_b, mul_op_reg, mul_start, mul_cycle_counter, mul_stage1_sum, mul_stage1_carry, mul_stage2_sum, mul_stage2_carry, mul_valid, mul_result_reg, mul_in_progress, mul_rd_reg, mul_control_reg, mul_pc_reg, div_dividend, div_divisor, div_op_reg, div_state, div_remainder, div_quotient, div_iter_count, div_sign, div_neg_result, div_valid, div_result_reg, div_rd_reg, div_control_reg, div_pc_reg)
         decode_signals = decode_stage.build(if_id_valid, if_id_pc, if_id_instruction, if_id_prediction_info, id_ex_pc, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_need_rs1, id_ex_need_rs2, id_ex_prediction_info, reg_file, execute_stage)
         fetch_signals = fetch_stage.build(pc, stall, if_id_pc, if_id_instruction, if_id_valid, if_id_prediction_info, instruction_memory, btb, bht, btb_valid, decode_stage)
         hazard_unit.build(pc, stall, if_id_valid, if_id_instruction, if_id_prediction_info, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_prediction_info, ex_mem_valid, mem_wb_valid, btb, bht, btb_valid, fetch_signals, decode_signals, execute_signals, memory_signals, writeback_signals, mul_in_progress, mul_cycle_counter, div_state, div_iter_count)
