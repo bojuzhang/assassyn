@@ -184,55 +184,35 @@ class DecodeStage(Module):
         rs2 = instruction[20:24]           # bits 24:20
         funct7 = instruction[25:31]         # bits 31:25
 
-        # 提取立即数 - 使用手动符号扩展
+        # 提取立即数 - 统一符号扩展优化
+        # 使用instruction[31]作为唯一符号位源，复用符号扩展高位常量
+        sign_bit = instruction[31:31]
+        sign_ext_20 = sign_bit.select(Bits(20)(0xFFFFF), Bits(20)(0))
+        sign_ext_19 = sign_bit.select(Bits(19)(0x7FFFF), Bits(19)(0))
+        sign_ext_11 = sign_bit.select(Bits(11)(0x7FF), Bits(11)(0))
+        
         # I型立即数 (12位有符号数)
         imm_i_bits = instruction[20:31]
-        sign_bit_i = imm_i_bits[11:11]  # 获取符号位
-        # 手动扩展符号位：如果符号位为1，则高位全为1；否则为0
-        immediate_i = (sign_bit_i == UInt(1)(1)).select(
-            concat(Bits(20)(0xFFFFF), imm_i_bits).bitcast(UInt(32)),  # 负数扩展
-            concat(Bits(20)(0x00000), imm_i_bits).bitcast(UInt(32))   # 正数扩展
-        )
+        immediate_i = concat(sign_ext_20, imm_i_bits).bitcast(UInt(32))
         
         # S型立即数 (12位有符号数)
         imm_s_bits = concat(instruction[25:31], instruction[7:11])
-        sign_bit_s = imm_s_bits[11:11]  # 获取符号位
-        immediate_s = (sign_bit_s == UInt(1)(1)).select(
-            concat(Bits(20)(0xFFFFF), imm_s_bits).bitcast(UInt(32)),  # 负数扩展
-            concat(Bits(20)(0x00000), imm_s_bits).bitcast(UInt(32))   # 正数扩展
-        )
+        immediate_s = concat(sign_ext_20, imm_s_bits).bitcast(UInt(32))
         
         # B型立即数 (13位有符号数，左移1位)
         imm_b_bits = concat(instruction[31:31], instruction[7:7], instruction[25:30], instruction[8:11], UInt(1)(0))
-        sign_bit_b = imm_b_bits[12:12]  # 获取符号位
-        immediate_b = (sign_bit_b == UInt(1)(1)).select(
-            concat(Bits(19)(0x7FFFF), imm_b_bits).bitcast(UInt(32)),  # 负数扩展
-            concat(Bits(19)(0x00000), imm_b_bits).bitcast(UInt(32))   # 正数扩展
-        )
+        immediate_b = concat(sign_ext_19, imm_b_bits).bitcast(UInt(32))
         
-        # U型立即数 (20位无符号数，左移12位)
+        # U型立即数 (20位无符号数，左移12位，不需要符号扩展)
         immediate_u = (instruction[12:31] << UInt(XLEN)(12)).bitcast(UInt(32))
         
         # J型立即数 (21位有符号数，左移1位)
         imm_j_bits = concat(instruction[31:31], instruction[12:19], instruction[20:20], instruction[21:30], UInt(1)(0))
-        sign_bit_j = imm_j_bits[20:20]  # 获取符号位
-        immediate_j = (sign_bit_j == UInt(1)(1)).select(
-            concat(Bits(11)(0x7FF), imm_j_bits).bitcast(UInt(32)),  # 负数扩展
-            concat(Bits(11)(0x000), imm_j_bits).bitcast(UInt(32))   # 正数扩展
-        )
+        immediate_j = concat(sign_ext_11, imm_j_bits).bitcast(UInt(32))
         
-        # 控制信号解码
+        # 控制信号初始化（仅初始化需要后续覆盖的变量）
         alu_op = UInt(5)(0)
-        mem_read = UInt(1)(0)
-        mem_write = UInt(1)(0)
-        reg_write = UInt(1)(0)
-        mem_to_reg = UInt(1)(0)
-        alu_src = UInt(2)(0)  # 00:寄存器, 01:立即数, 10:PC
-        branch_op = UInt(3)(0)
-        jump_op = UInt(1)(0)  # 跳转指令标志
-        jumpr_op = UInt(1)(0)  # 寄存器跳转指令标志
         immediate = UInt(XLEN)(0)  # 初始化立即数
-        alu_a_zero = UInt(1)(0)  # LUI指令需要alu_a=0
         
         is_r_type = (opcode == UInt(7)(0b0110011))
         is_i_type = (opcode == UInt(7)(0b0010011))
@@ -282,46 +262,48 @@ class DecodeStage(Module):
         alu_op_tmp = (func3 == UInt(3)(0b011)).select(UInt(5)(0b00111), alu_op_tmp)  # SLTU
         alu_op_tmp = (func3 == UInt(3)(0b001)).select(UInt(5)(0b00010), alu_op_tmp)  # SLL
         alu_op_tmp = ((funct7[5:5] == UInt(1)(0)) & (func3 == UInt(3)(0b101))).select(UInt(5)(0b00101), alu_op_tmp)  # SRL
+        # ==================== 控制信号生成优化 ====================
+        # 使用聚合条件一次性生成控制信号，减少链式select
+        
+        # ALU操作码：仅对R型和I型有效
         alu_op = (is_r_type | is_i_type).select(alu_op_tmp, alu_op)
-        reg_write = (is_r_type | is_i_type).select(UInt(1)(1), reg_write)
-        alu_src = is_r_type.select(UInt(2)(0), alu_src)
-        alu_src = is_i_type.select(UInt(2)(1), alu_src)
+        
+        # reg_write: 聚合条件判断 - 所有会写寄存器的指令类型
+        writes_reg = (is_r_type | is_i_type | is_l_type | is_lui_type | is_auipc_type | is_j_type | is_jr_type | is_mul_inst | is_div_inst)
+        rd_nonzero = (rd != UInt(5)(0))
+        reg_write = (writes_reg & rd_nonzero).select(UInt(1)(1), UInt(1)(0))
+        
+        # mem_read/mem_write/mem_to_reg: 直接由类型判定
+        mem_read = is_l_type.select(UInt(1)(1), UInt(1)(0))
+        mem_write = is_s_type.select(UInt(1)(1), UInt(1)(0))
+        mem_to_reg = is_l_type.select(UInt(1)(1), UInt(1)(0))
+        
+        # alu_src: 优先级明确的两段赋值
+        # 默认0 (寄存器), 立即数类指令设为1, AUIPC设为2
+        # 注意: 乘除法指令使用寄存器操作数(0)
+        uses_imm = (is_i_type | is_l_type | is_s_type | is_lui_type | is_j_type | is_jr_type)
+        alu_src = uses_imm.select(UInt(2)(1), UInt(2)(0))
+        alu_src = is_auipc_type.select(UInt(2)(2), alu_src)
+        
+        # immediate 选择：根据指令类型选择对应立即数
         immediate = is_i_type.select(immediate_i, immediate)
-        
-        mem_read = is_l_type.select(UInt(1)(1), mem_read)  # Load指令
-        reg_write = is_l_type.select(UInt(1)(1), reg_write)  # x0寄存器不会写入
-        mem_to_reg = is_l_type.select(UInt(1)(1), mem_to_reg)  # Load指令
-        alu_src = is_l_type.select(UInt(2)(1), alu_src)
         immediate = is_l_type.select(immediate_i, immediate)
-        
-        # Load类型解码 (3位, 使用funct3)
-        # 000 = LB (Load Byte, signed)
-        # 001 = LH (Load Halfword, signed)
-        # 010 = LW (Load Word)
-        # 100 = LBU (Load Byte Unsigned)
-        # 101 = LHU (Load Halfword Unsigned)
-        load_type_bits = UInt(3)(0b010)  # 默认LW
-        load_type_bits = (is_l_type & (func3 == UInt(3)(0b000))).select(UInt(3)(0b000), load_type_bits)  # LB
-        load_type_bits = (is_l_type & (func3 == UInt(3)(0b001))).select(UInt(3)(0b001), load_type_bits)  # LH
-        load_type_bits = (is_l_type & (func3 == UInt(3)(0b010))).select(UInt(3)(0b010), load_type_bits)  # LW
-        load_type_bits = (is_l_type & (func3 == UInt(3)(0b100))).select(UInt(3)(0b100), load_type_bits)  # LBU
-        load_type_bits = (is_l_type & (func3 == UInt(3)(0b101))).select(UInt(3)(0b101), load_type_bits)  # LHU
-            
-        store_type_bits = UInt(2)(0)
-
-
-
-
-
-
-        store_type_bits = UInt(2)(0)
-        mem_write = is_s_type.select(UInt(1)(1), mem_write)  # SW (Store Word)
-        alu_src = is_s_type.select(UInt(2)(1), alu_src)
         immediate = is_s_type.select(immediate_s, immediate)
-        store_type_bits = (is_s_type & (func3 == UInt(3)(0b010))).select(UInt(2)(0b10), store_type_bits)  # SW (Store Word)
-        store_type_bits = (is_s_type & (func3 == UInt(3)(0b000))).select(UInt(2)(0b00), store_type_bits)  # SB (Store Byte)
-        store_type_bits = (is_s_type & (func3 == UInt(3)(0b001))).select(UInt(2)(0b01), store_type_bits)  # SH (Store Halfword)
+        immediate = is_b_type.select(immediate_b, immediate)
+        immediate = (is_lui_type | is_auipc_type).select(immediate_u, immediate)
+        immediate = is_j_type.select(immediate_j, immediate)
+        immediate = is_jr_type.select(immediate_i, immediate)
+        
+        # Load类型解码 (3位, 直接使用funct3, 对非Load指令默认LW)
+        load_type_bits = is_l_type.select(func3.bitcast(UInt(3)), UInt(3)(0b010))
+        
+        # Store类型解码 (2位)
+        store_type_bits = UInt(2)(0)
+        store_type_bits = (is_s_type & (func3 == UInt(3)(0b010))).select(UInt(2)(0b10), store_type_bits)  # SW
+        store_type_bits = (is_s_type & (func3 == UInt(3)(0b000))).select(UInt(2)(0b00), store_type_bits)  # SB
+        store_type_bits = (is_s_type & (func3 == UInt(3)(0b001))).select(UInt(2)(0b01), store_type_bits)  # SH
 
+        # branch_op: 仅对B型指令有效
         branch_op_tmp = UInt(3)(0)
         branch_op_tmp = (func3 == UInt(3)(0b000)).select(UInt(3)(0b001), branch_op_tmp)  # BEQ
         branch_op_tmp = (func3 == UInt(3)(0b001)).select(UInt(3)(0b010), branch_op_tmp)  # BNE
@@ -329,34 +311,14 @@ class DecodeStage(Module):
         branch_op_tmp = (func3 == UInt(3)(0b101)).select(UInt(3)(0b100), branch_op_tmp)  # BGE
         branch_op_tmp = (func3 == UInt(3)(0b110)).select(UInt(3)(0b101), branch_op_tmp)  # BLTU
         branch_op_tmp = (func3 == UInt(3)(0b111)).select(UInt(3)(0b110), branch_op_tmp)  # BGEU
-        immediate = is_b_type.select(immediate_b, immediate)
-        branch_op = is_b_type.select(branch_op_tmp, branch_op)
-            
-        reg_write = (is_lui_type | is_auipc_type).select(UInt(1)(1), reg_write)
-        alu_src = is_lui_type.select(UInt(2)(1), alu_src)
-        alu_a_zero = is_lui_type.select(UInt(1)(1), alu_a_zero)  # LUI需要alu_a=0
-        immediate = (is_lui_type | is_auipc_type).select(immediate_u, immediate)
-        alu_src = is_auipc_type.select(UInt(2)(2), alu_src)
+        branch_op = is_b_type.select(branch_op_tmp, UInt(3)(0))
         
-        reg_write = is_j_type.select(UInt(1)(1), reg_write)
-        alu_src = is_j_type.select(UInt(2)(1), alu_src)
-        immediate = is_j_type.select(immediate_j, immediate)
-        jump_op = is_j_type.select(UInt(1)(1), jump_op)
-
-        reg_write = is_jr_type.select(UInt(1)(1), reg_write)
-        alu_src = is_jr_type.select(UInt(2)(1), alu_src)
-        immediate = is_jr_type.select(immediate_i, immediate)
-        jumpr_op = is_jr_type.select(UInt(1)(1), jumpr_op)
+        # LUI专用信号
+        alu_a_zero = is_lui_type.select(UInt(1)(1), UInt(1)(0))
         
-        # M扩展乘法指令设置
-        reg_write = is_mul_inst.select(UInt(1)(1), reg_write)  # 乘法指令写回寄存器
-        alu_src = is_mul_inst.select(UInt(2)(0), alu_src)  # 乘法使用寄存器操作数
-        
-        # M扩展除法指令设置
-        reg_write = is_div_inst.select(UInt(1)(1), reg_write)  # 除法指令写回寄存器
-        alu_src = is_div_inst.select(UInt(2)(0), alu_src)  # 除法使用寄存器操作数
-
-        reg_write = (rd == UInt(5)(0)).select(UInt(1)(0), reg_write)  # rd为x0时不写入
+        # 跳转指令标志
+        jump_op = is_j_type.select(UInt(1)(1), UInt(1)(0))
+        jumpr_op = is_jr_type.select(UInt(1)(1), UInt(1)(0))
         
         # 新控制信号格式 (48位):
         # [47:45] - div_op (3位除法操作码)
@@ -453,44 +415,106 @@ class ExecuteStage(Module):
         super().__init__(ports={})
     
     def alu_unit(self, op: Value, a: Value, b: Value):
+        """ALU单元优化版本：共享加减法器、移位器和比较器"""
         
-        # 默认结果
-        result = UInt(XLEN)(0)
-        zero = UInt(1)(0)
+        # 类型转换（只做一次）
         a_signed = a.bitcast(Int(XLEN))
         b_signed = b.bitcast(Int(XLEN))
         
-        # 根据操作码执行不同操作
-        result = (op == UInt(5)(0b00000)).select(a + b, result)  # ADD
-        result = (op == UInt(5)(0b00001)).select(a - b, result)  # SUB
-        result = (op == UInt(5)(0b00010)).select((a << (b & UInt(XLEN)(0x1F))).bitcast(UInt(XLEN)), result)  # SLL
-        result = (op == UInt(5)(0b00011)).select((a_signed < b_signed).select(UInt(XLEN)(1), UInt(XLEN)(0)), result)  # SLT
-        result = (op == UInt(5)(0b00100)).select((a ^ b).bitcast(UInt(XLEN)), result)  # XOR
-        result = (op == UInt(5)(0b00101)).select((a >> (b & UInt(XLEN)(0x1F))).bitcast(UInt(XLEN)), result)  # SRL
-        result = (op == UInt(5)(0b00110)).select((a_signed >> (b & UInt(XLEN)(0x1F))).bitcast(UInt(XLEN)), result)  # SRA
-        result = (op == UInt(5)(0b00111)).select((a < b).select(UInt(XLEN)(1), UInt(XLEN)(0)), result)  # SLTU
-        result = (op == UInt(5)(0b01000)).select((a | b).bitcast(UInt(XLEN)), result)  # OR
-        result = (op == UInt(5)(0b01001)).select((a & b).bitcast(UInt(XLEN)), result)  # AND
+        # ==================== 共享运算器 ====================
         
-        # log("ALU: OP={:05b}, A={:08x}, B={:08x}, Result={:08x}",
-            # op, a, b, result)
+        # 共享加/减法器：根据op判断是否减法（op[0]=1表示SUB）
+        # ADD=00000, SUB=00001, 差异在最低位
+        is_sub = op[0:0]
+        b_neg = ((~b).bitcast(UInt(XLEN)) + UInt(XLEN)(1))  # 取反加1得到-b
+        b_for_add = is_sub.select(b_neg, b)  # SUB时使用-b
+        add_sub_result = a + b_for_add  # 共享加法器
+        
+        # 共享移位量
+        shift_amount = b[0:4]  # 取低5位作为移位量
+        
+        # 共享移位器结果
+        sll_result = (a << shift_amount).bitcast(UInt(XLEN))  # 逻辑左移
+        srl_result = (a >> shift_amount).bitcast(UInt(XLEN))  # 逻辑右移
+        sra_result = (a_signed >> shift_amount).bitcast(UInt(XLEN))  # 算术右移
+        
+        # 共享比较器（只计算一次）
+        lt_signed = (a_signed < b_signed)  # 有符号小于
+        lt_unsigned = (a < b)              # 无符号小于
+        
+        # 逻辑运算（简单组合逻辑）
+        and_result = (a & b).bitcast(UInt(XLEN))
+        or_result = (a | b).bitcast(UInt(XLEN))
+        xor_result = (a ^ b).bitcast(UInt(XLEN))
+        
+        # 比较结果转换为32位
+        slt_result = lt_signed.select(UInt(XLEN)(1), UInt(XLEN)(0))
+        sltu_result = lt_unsigned.select(UInt(XLEN)(1), UInt(XLEN)(0))
+        
+        # ==================== 结果选择（使用分组减少选择器层数） ====================
+        # 操作码映射:
+        # 00000 ADD, 00001 SUB -> 使用add_sub_result
+        # 00010 SLL           -> 使用sll_result
+        # 00011 SLT           -> 使用slt_result
+        # 00100 XOR           -> 使用xor_result
+        # 00101 SRL           -> 使用srl_result
+        # 00110 SRA           -> 使用sra_result
+        # 00111 SLTU          -> 使用sltu_result
+        # 01000 OR            -> 使用or_result
+        # 01001 AND           -> 使用and_result
+        
+        # 第一级：根据op[4:1]分组选择
+        result = UInt(XLEN)(0)
+        
+        # ADD/SUB组 (op[4:1]=0000)
+        result = (op[1:4] == UInt(4)(0b0000)).select(add_sub_result, result)
+        # SLL (op=00010)
+        result = (op == UInt(5)(0b00010)).select(sll_result, result)
+        # SLT (op=00011)
+        result = (op == UInt(5)(0b00011)).select(slt_result, result)
+        # XOR (op=00100)
+        result = (op == UInt(5)(0b00100)).select(xor_result, result)
+        # SRL (op=00101)
+        result = (op == UInt(5)(0b00101)).select(srl_result, result)
+        # SRA (op=00110)
+        result = (op == UInt(5)(0b00110)).select(sra_result, result)
+        # SLTU (op=00111)
+        result = (op == UInt(5)(0b00111)).select(sltu_result, result)
+        # OR (op=01000)
+        result = (op == UInt(5)(0b01000)).select(or_result, result)
+        # AND (op=01001)
+        result = (op == UInt(5)(0b01001)).select(and_result, result)
         
         return result
 
     def branch_unit(self, op: Value, a: Value, b: Value):
+        """分支单元优化版本：复用等于和大小比较器"""
         
-        taken = UInt(1)(0)
+        # 类型转换（只做一次）
         a_signed = a.bitcast(Int(XLEN))
         b_signed = b.bitcast(Int(XLEN))
-        taken = (op == UInt(3)(0b001)).select((a == b).select(UInt(1)(1), UInt(1)(0)), taken)  # BEQ
-        taken = (op == UInt(3)(0b010)).select((a != b).select(UInt(1)(1), UInt(1)(0)), taken)  # BNE
-        taken = (op == UInt(3)(0b011)).select((a_signed < b_signed).select(UInt(1)(1), UInt(1)(0)), taken)  # BLT
-        taken = (op == UInt(3)(0b100)).select((a_signed >= b_signed).select(UInt(1)(1), UInt(1)(0)), taken)  # BGE
-        taken = (op == UInt(3)(0b101)).select((a < b).select(UInt(1)(1), UInt(1)(0)), taken)  # BLTU
-        taken = (op == UInt(3)(0b110)).select((a >= b).select(UInt(1)(1), UInt(1)(0)), taken)  # BGEU
         
-        # log("BRANCH: OP={:03b}, A={:08x}, B={:08x}, Taken={}",
-        #     op, a, b, taken)
+        # ==================== 共享比较器（预计算比较结果） ====================
+        eq = (a == b)                   # 等于
+        lt_signed = (a_signed < b_signed)  # 有符号小于
+        lt_unsigned = (a < b)              # 无符号小于
+        
+        # ==================== 根据branch_op映射taken ====================
+        # branch_op编码:
+        # 001 - BEQ:  taken = eq
+        # 010 - BNE:  taken = ~eq
+        # 011 - BLT:  taken = lt_signed
+        # 100 - BGE:  taken = ~lt_signed
+        # 101 - BLTU: taken = lt_unsigned
+        # 110 - BGEU: taken = ~lt_unsigned
+        
+        taken = UInt(1)(0)
+        taken = (op == UInt(3)(0b001)).select(eq.select(UInt(1)(1), UInt(1)(0)), taken)           # BEQ
+        taken = (op == UInt(3)(0b010)).select((~eq).select(UInt(1)(1), UInt(1)(0)), taken)        # BNE
+        taken = (op == UInt(3)(0b011)).select(lt_signed.select(UInt(1)(1), UInt(1)(0)), taken)    # BLT
+        taken = (op == UInt(3)(0b100)).select((~lt_signed).select(UInt(1)(1), UInt(1)(0)), taken) # BGE
+        taken = (op == UInt(3)(0b101)).select(lt_unsigned.select(UInt(1)(1), UInt(1)(0)), taken)  # BLTU
+        taken = (op == UInt(3)(0b110)).select((~lt_unsigned).select(UInt(1)(1), UInt(1)(0)), taken) # BGEU
         
         return taken
 
