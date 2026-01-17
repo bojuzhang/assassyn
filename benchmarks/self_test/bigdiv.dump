@@ -1,0 +1,47 @@
+
+test.elf:     file format elf32-littleriscv
+
+
+Disassembly of section .text:
+
+00000000 <_start>:
+   0:	00004137          	lui	sp,0x4
+   4:	038000ef          	jal	ra,3c <main>
+
+00000008 <loop>:
+   8:	0000006f          	j	8 <loop>
+
+0000000c <my_divu>:
+   c:	fe010113          	addi	sp,sp,-32 # 3fe0 <main+0x3fa4>
+  10:	00812e23          	sw	s0,28(sp)
+  14:	02010413          	addi	s0,sp,32
+  18:	fea42623          	sw	a0,-20(s0)
+  1c:	feb42423          	sw	a1,-24(s0)
+  20:	fec42703          	lw	a4,-20(s0)
+  24:	fe842783          	lw	a5,-24(s0)
+  28:	02f757b3          	divu	a5,a4,a5
+  2c:	00078513          	mv	a0,a5
+  30:	01c12403          	lw	s0,28(sp)
+  34:	02010113          	addi	sp,sp,32
+  38:	00008067          	ret
+
+0000003c <main>:
+  3c:	fe010113          	addi	sp,sp,-32
+  40:	00112e23          	sw	ra,28(sp)
+  44:	00812c23          	sw	s0,24(sp)
+  48:	02010413          	addi	s0,sp,32
+  4c:	800007b7          	lui	a5,0x80000
+  50:	00178793          	addi	a5,a5,1 # 80000001 <main+0x7fffffc5>
+  54:	fef42623          	sw	a5,-20(s0)
+  58:	400007b7          	lui	a5,0x40000
+  5c:	fef42423          	sw	a5,-24(s0)
+  60:	fe842583          	lw	a1,-24(s0)
+  64:	fec42503          	lw	a0,-20(s0)
+  68:	fa5ff0ef          	jal	ra,c <my_divu>
+  6c:	fea42223          	sw	a0,-28(s0)
+  70:	fe442783          	lw	a5,-28(s0)
+  74:	00078513          	mv	a0,a5
+  78:	01c12083          	lw	ra,28(sp)
+  7c:	01812403          	lw	s0,24(sp)
+  80:	02010113          	addi	sp,sp,32
+  84:	00008067          	ret

@@ -1,0 +1,68 @@
+
+test.elf:     file format elf32-littleriscv
+
+
+Disassembly of section .text:
+
+00000000 <_start>:
+   0:	00004137          	lui	sp,0x4
+   4:	090000ef          	jal	ra,94 <main>
+
+00000008 <loop>:
+   8:	0000006f          	j	8 <loop>
+
+0000000c <mulh>:
+   c:	fd010113          	addi	sp,sp,-48 # 3fd0 <main+0x3f3c>
+  10:	02812623          	sw	s0,44(sp)
+  14:	03010413          	addi	s0,sp,48
+  18:	fca42e23          	sw	a0,-36(s0)
+  1c:	fcb42c23          	sw	a1,-40(s0)
+  20:	fdc42583          	lw	a1,-36(s0)
+  24:	00058813          	mv	a6,a1
+  28:	41f5d593          	srai	a1,a1,0x1f
+  2c:	00058893          	mv	a7,a1
+  30:	fd842583          	lw	a1,-40(s0)
+  34:	00058613          	mv	a2,a1
+  38:	41f5d593          	srai	a1,a1,0x1f
+  3c:	00058693          	mv	a3,a1
+  40:	02c88533          	mul	a0,a7,a2
+  44:	030685b3          	mul	a1,a3,a6
+  48:	00b505b3          	add	a1,a0,a1
+  4c:	02c80533          	mul	a0,a6,a2
+  50:	02c837b3          	mulhu	a5,a6,a2
+  54:	00050713          	mv	a4,a0
+  58:	00f586b3          	add	a3,a1,a5
+  5c:	00068793          	mv	a5,a3
+  60:	fee42423          	sw	a4,-24(s0)
+  64:	fef42623          	sw	a5,-20(s0)
+  68:	fee42423          	sw	a4,-24(s0)
+  6c:	fef42623          	sw	a5,-20(s0)
+  70:	fec42783          	lw	a5,-20(s0)
+  74:	4007d313          	srai	t1,a5,0x0
+  78:	fec42783          	lw	a5,-20(s0)
+  7c:	41f7d393          	srai	t2,a5,0x1f
+  80:	00030793          	mv	a5,t1
+  84:	00078513          	mv	a0,a5
+  88:	02c12403          	lw	s0,44(sp)
+  8c:	03010113          	addi	sp,sp,48
+  90:	00008067          	ret
+
+00000094 <main>:
+  94:	fe010113          	addi	sp,sp,-32
+  98:	00112e23          	sw	ra,28(sp)
+  9c:	00812c23          	sw	s0,24(sp)
+  a0:	02010413          	addi	s0,sp,32
+  a4:	fff00793          	li	a5,-1
+  a8:	fef42623          	sw	a5,-20(s0)
+  ac:	fff00793          	li	a5,-1
+  b0:	fef42423          	sw	a5,-24(s0)
+  b4:	fe842583          	lw	a1,-24(s0)
+  b8:	fec42503          	lw	a0,-20(s0)
+  bc:	f51ff0ef          	jal	ra,c <mulh>
+  c0:	fea42223          	sw	a0,-28(s0)
+  c4:	fe442783          	lw	a5,-28(s0)
+  c8:	00078513          	mv	a0,a5
+  cc:	01c12083          	lw	ra,28(sp)
+  d0:	01812403          	lw	s0,24(sp)
+  d4:	02010113          	addi	sp,sp,32
+  d8:	00008067          	ret

@@ -268,8 +268,8 @@ class DecodeStage(Module):
         
         # 是否为除法指令
         is_div_inst = (div_op != UInt(3)(DIV_OP_NONE))
-        # log("ID DECODE: opcode={:07b}, funct7={:07b}, func3={:03b}, is_r_type={}, is_m_ext={}, mul_op={}, is_mul_inst={}", 
-            # opcode, funct7, func3, is_r_type, is_m_ext, mul_op, is_mul_inst)
+        log("ID DECODE: opcode={:07b}, funct7={:07b}, func3={:03b}, is_r_type={}, is_m_ext={}, mul_op={}, is_mul_inst={}", 
+            opcode, funct7, func3, is_r_type, is_m_ext, mul_op, is_mul_inst)
         
         alu_op_tmp = UInt(5)(0)
         alu_op_tmp = ((is_r_type & funct7[5:5] == UInt(1)(1)) & (func3 == UInt(3)(0b000))).select(UInt(5)(0b00001), alu_op_tmp)  # SUB
@@ -495,7 +495,7 @@ class ExecuteStage(Module):
         return taken
 
     @module.combinational
-    def build(self, id_ex_valid, id_ex_pc, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_control, id_ex_prediction_info, ex_mem_pc, ex_mem_control, ex_mem_valid, ex_mem_result, ex_mem_data, reg_file, memory_stage, mem_wb_control, mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, data_sram, mem_wb_addr, ex_mem_pc_change, ex_mem_target_pc, ex_mem_prediction_result, ex_sig_control, mul_a, mul_b, mul_op_reg, mul_start, mul_cycle_counter, mul_stage1_sum, mul_stage1_carry, mul_stage2_sum, mul_stage2_carry, mul_valid, mul_result_reg, mul_in_progress, mul_rd_reg, mul_control_reg, mul_pc_reg, div_dividend, div_divisor, div_op_reg, div_state, div_remainder, div_quotient_pos, div_quotient_neg, div_iter_count, div_sign, div_dividend_sign, div_valid, div_result_reg, div_rd_reg, div_control_reg, div_pc_reg, div_norm_shift, div_divisor_norm):
+    def build(self, id_ex_valid, id_ex_pc, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_control, id_ex_prediction_info, ex_mem_pc, ex_mem_control, ex_mem_valid, ex_mem_result, ex_mem_data, reg_file, memory_stage, mem_wb_control, mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, data_sram, mem_wb_addr, ex_mem_pc_change, ex_mem_target_pc, ex_mem_prediction_result, ex_sig_control, mul_a, mul_b, mul_op_reg, mul_start, mul_cycle_counter, mul_stage1_sum, mul_stage1_carry, mul_stage2_sum, mul_stage2_carry, mul_valid, mul_result_reg, mul_in_progress, mul_rd_reg, mul_control_reg, mul_pc_reg, mul_result_sign, div_dividend, div_divisor, div_op_reg, div_state, div_remainder, div_quotient_pos, div_quotient_neg, div_iter_count, div_sign, div_dividend_sign, div_valid, div_result_reg, div_rd_reg, div_control_reg, div_pc_reg, div_norm_shift, div_divisor_norm):
         pc_in = id_ex_pc[0]
         rs1_idx = id_ex_rs1_idx[0]
         rs2_idx = id_ex_rs2_idx[0]
@@ -661,8 +661,8 @@ class ExecuteStage(Module):
         # 当前是否需要启动新的乘法
         # 只有当乘法器空闲且当前指令是乘法指令时才启动
         start_new_mul = (is_mul_inst & id_ex_valid[0] & ~mul_busy).select(UInt(1)(1), UInt(1)(0))
-        # log("MUL CHECK: is_mul_inst={}, id_ex_valid={}, mul_busy={}, mul_op={}, start_new_mul={}", 
-        #     is_mul_inst, id_ex_valid[0], mul_busy, mul_op, start_new_mul)
+        log("MUL CHECK: is_mul_inst={}, id_ex_valid={}, mul_busy={}, mul_op={}, control_mul_op={}, start_new_mul={}", 
+            is_mul_inst, id_ex_valid[0], mul_busy, mul_op, control_in[42:44], start_new_mul)
         
         # 保存乘法操作数和控制信息
         with Condition(start_new_mul):
@@ -682,57 +682,79 @@ class ExecuteStage(Module):
             a = mul_a[0]
             b = mul_b[0]
             saved_op = mul_op_reg[0]
-            # log("MUL CYCLE 1 READ: a={}, b={}, mul_a[0]={}", a, b, mul_a[0])
+            log("MUL CYCLE 1: a={:08x}, b={:08x}, saved_op={}", a, b, saved_op)
             
-            # 确定操作数符号属性
-            a_signed = ((saved_op == UInt(3)(MUL_OP_MUL)) | (saved_op == UInt(3)(MUL_OP_MULH)) | (saved_op == UInt(3)(MUL_OP_MULHSU))).select(UInt(1)(1), UInt(1)(0))
-            b_signed = ((saved_op == UInt(3)(MUL_OP_MUL)) | (saved_op == UInt(3)(MUL_OP_MULH))).select(UInt(1)(1), UInt(1)(0))
+            # ==================== 符号转换法 ====================
+            # 步骤1: 确定操作数符号属性
+            # MUL/MULH: 两个操作数都是有符号的
+            # MULHSU: a有符号，b无符号
+            # MULHU: 两个操作数都是无符号的
+            a_is_signed = ((saved_op == UInt(3)(MUL_OP_MUL)) | (saved_op == UInt(3)(MUL_OP_MULH)) | (saved_op == UInt(3)(MUL_OP_MULHSU))).select(UInt(1)(1), UInt(1)(0))
+            b_is_signed = ((saved_op == UInt(3)(MUL_OP_MUL)) | (saved_op == UInt(3)(MUL_OP_MULH))).select(UInt(1)(1), UInt(1)(0))
             
-            # 符号扩展到64位
+            # 步骤2: 提取符号位
             a_sign = a[31:31]
             b_sign = b[31:31]
-            a_high = (a_signed & a_sign).select(UInt(32)(0xFFFFFFFF), UInt(32)(0))
-            b_high = (b_signed & b_sign).select(UInt(32)(0xFFFFFFFF), UInt(32)(0))
             
-            # 直接将32位数转为64位进行计算，不使用concat
-            a_64 = a.bitcast(UInt(64))
-            b_64 = b.bitcast(UInt(64))
-            # log("MUL DEBUG3: a={}, a_64={}, b={}, b_64={}", a, a_64, b, b_64)
+            # 步骤3: 计算有效符号 (只有当操作数是有符号类型且符号位为1时才是负数)
+            a_negative = (a_is_signed & a_sign).select(UInt(1)(1), UInt(1)(0))
+            b_negative = (b_is_signed & b_sign).select(UInt(1)(1), UInt(1)(0))
+            
+            # 步骤4: 计算结果符号 (异或: 一正一负为负)
+            result_sign = (a_negative ^ b_negative).bitcast(UInt(1))
+            mul_result_sign[0] = result_sign
+            
+            # 步骤5: 取绝对值 (硬件实现: 如果是负数则取补码)
+            # 取补码: ~x + 1
+            a_abs_temp = (~a + UInt(32)(1)).bitcast(UInt(32))
+            b_abs_temp = (~b + UInt(32)(1)).bitcast(UInt(32))
+            
+            # 选择: 如果是负数用绝对值，否则用原值
+            a_abs = a_negative.select(a_abs_temp, a)
+            b_abs = b_negative.select(b_abs_temp, b)
+            
+            log("MUL SIGN CONV: a_sign={}, b_sign={}, a_is_signed={}, b_is_signed={}, a_negative={}, b_negative={}, result_sign={}", 
+                a_sign, b_sign, a_is_signed, b_is_signed, a_negative, b_negative, result_sign)
+            log("MUL ABS: a_abs={:08x}, b_abs={:08x}", a_abs, b_abs)
+            
+            # 步骤6: 对绝对值进行零扩展到64位 (无符号乘法)
+            a_64 = concat(UInt(32)(0), a_abs).bitcast(UInt(64))
+            b_64 = concat(UInt(32)(0), b_abs).bitcast(UInt(64))
             
             # 生成32个部分积 (移位后需要bitcast回UInt(64))
-            # 使用显式比较确保条件正确
-            pp0 = (b[0:0] == UInt(1)(1)).select(a_64, UInt(64)(0))
-            pp1 = (b[1:1] == UInt(1)(1)).select((a_64 << UInt(64)(1)).bitcast(UInt(64)), UInt(64)(0))
-            pp2 = (b[2:2] == UInt(1)(1)).select((a_64 << UInt(64)(2)).bitcast(UInt(64)), UInt(64)(0))
-            pp3 = (b[3:3] == UInt(1)(1)).select((a_64 << UInt(64)(3)).bitcast(UInt(64)), UInt(64)(0))
-            pp4 = (b[4:4] == UInt(1)(1)).select((a_64 << UInt(64)(4)).bitcast(UInt(64)), UInt(64)(0))
-            pp5 = (b[5:5] == UInt(1)(1)).select((a_64 << UInt(64)(5)).bitcast(UInt(64)), UInt(64)(0))
-            pp6 = (b[6:6] == UInt(1)(1)).select((a_64 << UInt(64)(6)).bitcast(UInt(64)), UInt(64)(0))
-            pp7 = (b[7:7] == UInt(1)(1)).select((a_64 << UInt(64)(7)).bitcast(UInt(64)), UInt(64)(0))
-            pp8 = (b[8:8] == UInt(1)(1)).select((a_64 << UInt(64)(8)).bitcast(UInt(64)), UInt(64)(0))
-            pp9 = (b[9:9] == UInt(1)(1)).select((a_64 << UInt(64)(9)).bitcast(UInt(64)), UInt(64)(0))
-            pp10 = (b[10:10] == UInt(1)(1)).select((a_64 << UInt(64)(10)).bitcast(UInt(64)), UInt(64)(0))
-            pp11 = (b[11:11] == UInt(1)(1)).select((a_64 << UInt(64)(11)).bitcast(UInt(64)), UInt(64)(0))
-            pp12 = (b[12:12] == UInt(1)(1)).select((a_64 << UInt(64)(12)).bitcast(UInt(64)), UInt(64)(0))
-            pp13 = (b[13:13] == UInt(1)(1)).select((a_64 << UInt(64)(13)).bitcast(UInt(64)), UInt(64)(0))
-            pp14 = (b[14:14] == UInt(1)(1)).select((a_64 << UInt(64)(14)).bitcast(UInt(64)), UInt(64)(0))
-            pp15 = (b[15:15] == UInt(1)(1)).select((a_64 << UInt(64)(15)).bitcast(UInt(64)), UInt(64)(0))
-            pp16 = (b[16:16] == UInt(1)(1)).select((a_64 << UInt(64)(16)).bitcast(UInt(64)), UInt(64)(0))
-            pp17 = (b[17:17] == UInt(1)(1)).select((a_64 << UInt(64)(17)).bitcast(UInt(64)), UInt(64)(0))
-            pp18 = (b[18:18] == UInt(1)(1)).select((a_64 << UInt(64)(18)).bitcast(UInt(64)), UInt(64)(0))
-            pp19 = (b[19:19] == UInt(1)(1)).select((a_64 << UInt(64)(19)).bitcast(UInt(64)), UInt(64)(0))
-            pp20 = (b[20:20] == UInt(1)(1)).select((a_64 << UInt(64)(20)).bitcast(UInt(64)), UInt(64)(0))
-            pp21 = (b[21:21] == UInt(1)(1)).select((a_64 << UInt(64)(21)).bitcast(UInt(64)), UInt(64)(0))
-            pp22 = (b[22:22] == UInt(1)(1)).select((a_64 << UInt(64)(22)).bitcast(UInt(64)), UInt(64)(0))
-            pp23 = (b[23:23] == UInt(1)(1)).select((a_64 << UInt(64)(23)).bitcast(UInt(64)), UInt(64)(0))
-            pp24 = (b[24:24] == UInt(1)(1)).select((a_64 << UInt(64)(24)).bitcast(UInt(64)), UInt(64)(0))
-            pp25 = (b[25:25] == UInt(1)(1)).select((a_64 << UInt(64)(25)).bitcast(UInt(64)), UInt(64)(0))
-            pp26 = (b[26:26] == UInt(1)(1)).select((a_64 << UInt(64)(26)).bitcast(UInt(64)), UInt(64)(0))
-            pp27 = (b[27:27] == UInt(1)(1)).select((a_64 << UInt(64)(27)).bitcast(UInt(64)), UInt(64)(0))
-            pp28 = (b[28:28] == UInt(1)(1)).select((a_64 << UInt(64)(28)).bitcast(UInt(64)), UInt(64)(0))
-            pp29 = (b[29:29] == UInt(1)(1)).select((a_64 << UInt(64)(29)).bitcast(UInt(64)), UInt(64)(0))
-            pp30 = (b[30:30] == UInt(1)(1)).select((a_64 << UInt(64)(30)).bitcast(UInt(64)), UInt(64)(0))
-            pp31 = (b[31:31] == UInt(1)(1)).select((a_64 << UInt(64)(31)).bitcast(UInt(64)), UInt(64)(0))
+            # 注意：使用 b_abs 来选择部分积，而不是原始的 b
+            pp0 = (b_abs[0:0] == UInt(1)(1)).select(a_64, UInt(64)(0))
+            pp1 = (b_abs[1:1] == UInt(1)(1)).select((a_64 << UInt(64)(1)).bitcast(UInt(64)), UInt(64)(0))
+            pp2 = (b_abs[2:2] == UInt(1)(1)).select((a_64 << UInt(64)(2)).bitcast(UInt(64)), UInt(64)(0))
+            pp3 = (b_abs[3:3] == UInt(1)(1)).select((a_64 << UInt(64)(3)).bitcast(UInt(64)), UInt(64)(0))
+            pp4 = (b_abs[4:4] == UInt(1)(1)).select((a_64 << UInt(64)(4)).bitcast(UInt(64)), UInt(64)(0))
+            pp5 = (b_abs[5:5] == UInt(1)(1)).select((a_64 << UInt(64)(5)).bitcast(UInt(64)), UInt(64)(0))
+            pp6 = (b_abs[6:6] == UInt(1)(1)).select((a_64 << UInt(64)(6)).bitcast(UInt(64)), UInt(64)(0))
+            pp7 = (b_abs[7:7] == UInt(1)(1)).select((a_64 << UInt(64)(7)).bitcast(UInt(64)), UInt(64)(0))
+            pp8 = (b_abs[8:8] == UInt(1)(1)).select((a_64 << UInt(64)(8)).bitcast(UInt(64)), UInt(64)(0))
+            pp9 = (b_abs[9:9] == UInt(1)(1)).select((a_64 << UInt(64)(9)).bitcast(UInt(64)), UInt(64)(0))
+            pp10 = (b_abs[10:10] == UInt(1)(1)).select((a_64 << UInt(64)(10)).bitcast(UInt(64)), UInt(64)(0))
+            pp11 = (b_abs[11:11] == UInt(1)(1)).select((a_64 << UInt(64)(11)).bitcast(UInt(64)), UInt(64)(0))
+            pp12 = (b_abs[12:12] == UInt(1)(1)).select((a_64 << UInt(64)(12)).bitcast(UInt(64)), UInt(64)(0))
+            pp13 = (b_abs[13:13] == UInt(1)(1)).select((a_64 << UInt(64)(13)).bitcast(UInt(64)), UInt(64)(0))
+            pp14 = (b_abs[14:14] == UInt(1)(1)).select((a_64 << UInt(64)(14)).bitcast(UInt(64)), UInt(64)(0))
+            pp15 = (b_abs[15:15] == UInt(1)(1)).select((a_64 << UInt(64)(15)).bitcast(UInt(64)), UInt(64)(0))
+            pp16 = (b_abs[16:16] == UInt(1)(1)).select((a_64 << UInt(64)(16)).bitcast(UInt(64)), UInt(64)(0))
+            pp17 = (b_abs[17:17] == UInt(1)(1)).select((a_64 << UInt(64)(17)).bitcast(UInt(64)), UInt(64)(0))
+            pp18 = (b_abs[18:18] == UInt(1)(1)).select((a_64 << UInt(64)(18)).bitcast(UInt(64)), UInt(64)(0))
+            pp19 = (b_abs[19:19] == UInt(1)(1)).select((a_64 << UInt(64)(19)).bitcast(UInt(64)), UInt(64)(0))
+            pp20 = (b_abs[20:20] == UInt(1)(1)).select((a_64 << UInt(64)(20)).bitcast(UInt(64)), UInt(64)(0))
+            pp21 = (b_abs[21:21] == UInt(1)(1)).select((a_64 << UInt(64)(21)).bitcast(UInt(64)), UInt(64)(0))
+            pp22 = (b_abs[22:22] == UInt(1)(1)).select((a_64 << UInt(64)(22)).bitcast(UInt(64)), UInt(64)(0))
+            pp23 = (b_abs[23:23] == UInt(1)(1)).select((a_64 << UInt(64)(23)).bitcast(UInt(64)), UInt(64)(0))
+            pp24 = (b_abs[24:24] == UInt(1)(1)).select((a_64 << UInt(64)(24)).bitcast(UInt(64)), UInt(64)(0))
+            pp25 = (b_abs[25:25] == UInt(1)(1)).select((a_64 << UInt(64)(25)).bitcast(UInt(64)), UInt(64)(0))
+            pp26 = (b_abs[26:26] == UInt(1)(1)).select((a_64 << UInt(64)(26)).bitcast(UInt(64)), UInt(64)(0))
+            pp27 = (b_abs[27:27] == UInt(1)(1)).select((a_64 << UInt(64)(27)).bitcast(UInt(64)), UInt(64)(0))
+            pp28 = (b_abs[28:28] == UInt(1)(1)).select((a_64 << UInt(64)(28)).bitcast(UInt(64)), UInt(64)(0))
+            pp29 = (b_abs[29:29] == UInt(1)(1)).select((a_64 << UInt(64)(29)).bitcast(UInt(64)), UInt(64)(0))
+            pp30 = (b_abs[30:30] == UInt(1)(1)).select((a_64 << UInt(64)(30)).bitcast(UInt(64)), UInt(64)(0))
+            pp31 = (b_abs[31:31] == UInt(1)(1)).select((a_64 << UInt(64)(31)).bitcast(UInt(64)), UInt(64)(0))
             
             # CSA函数: sum = a ^ b ^ c, carry = ((a&b)|(b&c)|(a&c)) << 1
             def csa(x, y, z):
@@ -827,19 +849,39 @@ class ExecuteStage(Module):
             mul_stage1_carry[0] = final_carry
             mul_cycle_counter[0] = UInt(2)(3)
         
-        # Cycle 3: 最终加法并选择结果
+        # Cycle 3: 最终加法并选择结果 (符号转换法最后一步)
         with Condition(mul_cycle == UInt(2)(3)):
-            final_result = mul_stage1_sum[0] + mul_stage1_carry[0]
+            # 步骤1: 计算无符号乘法结果 (绝对值的乘积)
+            unsigned_result = mul_stage1_sum[0] + mul_stage1_carry[0]
             saved_op = mul_op_reg[0]
+            saved_sign = mul_result_sign[0]  # 从Cycle 1保存的结果符号
             
-            # 根据mul_op选择高32位或低32位
+            # 步骤2: 根据符号修正64位结果 (取补码)
+            # 如果 result_sign == 1 (结果应为负数)，则对64位结果取补码
+            # 补码: ~x + 1
+            negated_result = (~unsigned_result + UInt(64)(1)).bitcast(UInt(64))
+            
+            # 步骤3: 选择最终的64位结果
+            # 对于 MUL/MULH: 如果符号异或为1则取反
+            # 对于 MULHSU: 如果符号异或为1则取反  
+            # 对于 MULHU: 不需要取反 (无符号乘法)
+            is_unsigned_only = (saved_op == UInt(3)(MUL_OP_MULHU)).select(UInt(1)(1), UInt(1)(0))
+            need_negate = (saved_sign & ~is_unsigned_only).select(UInt(1)(1), UInt(1)(0))
+            final_result = need_negate.select(negated_result, unsigned_result)
+            
+            log("MUL CYCLE 3 SIGN: saved_sign={}, is_unsigned_only={}, need_negate={}", 
+                saved_sign, is_unsigned_only, need_negate)
+            log("MUL CYCLE 3: unsigned_result={:016x}, negated_result={:016x}, final_result={:016x}", 
+                unsigned_result, negated_result, final_result)
+            
+            # 步骤4: 根据mul_op选择高32位或低32位
             result_low = final_result[0:31].bitcast(UInt(32))
             result_high = final_result[32:63].bitcast(UInt(32))
             
             # MUL: 低32位; MULH/MULHSU/MULHU: 高32位
             mul_result_val = (saved_op == UInt(3)(MUL_OP_MUL)).select(result_low, result_high)
-            # log("MUL CYCLE 3: sum={}, carry={}, final_result={}, result_low={}, saved_op={}", 
-                # mul_stage1_sum[0], mul_stage1_carry[0], final_result, result_low, saved_op)
+            log("MUL CYCLE 3 RESULT: result_high={:08x}, result_low={:08x}, saved_op={}, final_result_val={:08x}", 
+                result_high, result_low, saved_op, mul_result_val)
             mul_result_reg[0] = mul_result_val
             mul_valid[0] = UInt(1)(1)
             mul_cycle_counter[0] = UInt(2)(0)
@@ -847,10 +889,16 @@ class ExecuteStage(Module):
         
         # 在外部也计算当前周期的乘法结果（供 mul_done 时使用）
         # 这个计算在每个周期都会执行，但只有在 mul_cycle == 3 时结果才有意义
-        current_final_result = mul_stage1_sum[0] + mul_stage1_carry[0]
+        # 需要同步符号修正逻辑
+        current_unsigned_result = mul_stage1_sum[0] + mul_stage1_carry[0]
+        current_saved_op = mul_op_reg[0]
+        current_saved_sign = mul_result_sign[0]
+        current_negated_result = (~current_unsigned_result + UInt(64)(1)).bitcast(UInt(64))
+        current_is_unsigned_only = (current_saved_op == UInt(3)(MUL_OP_MULHU)).select(UInt(1)(1), UInt(1)(0))
+        current_need_negate = (current_saved_sign & ~current_is_unsigned_only).select(UInt(1)(1), UInt(1)(0))
+        current_final_result = current_need_negate.select(current_negated_result, current_unsigned_result)
         current_result_low = current_final_result[0:31].bitcast(UInt(32))
         current_result_high = current_final_result[32:63].bitcast(UInt(32))
-        current_saved_op = mul_op_reg[0]
         current_mul_result = (current_saved_op == UInt(3)(MUL_OP_MUL)).select(current_result_low, current_result_high)
         
         # 非乘法周期重置valid
@@ -993,34 +1041,36 @@ class ExecuteStage(Module):
             
             # ========== 商数字选择（基于 P 和 D 的比较）==========
             # P_shifted 是 64 位，取高 32 位进行比较
-            # P_high = P_shifted[32:63]（有符号 32 位）
-            P_high_32 = P_shifted[32:63].bitcast(Int(32))
-            D_signed = D.bitcast(Int(32))
+            # P_high = P_shifted[32:63]
+            # 
+            # 关键修复：对于无符号除法，P 始终为正，使用无符号比较
+            # 对于有符号除法，P 可能为负，使用有符号比较
+            # 
+            # 但在当前实现中，我们对被除数取了绝对值，所以 P 始终为正
+            # 因此应该使用无符号比较
             
-            # 计算比较边界
+            P_high_32 = P_shifted[32:63].bitcast(UInt(32))
+            # 将 P_high 零扩展到 64 位（无符号）
+            P_high_64 = P_high_32.zext(UInt(64))
+            
+            # 将 D 零扩展到 64 位（D 是绝对值，始终非负）
+            D_64_for_cmp = D.zext(UInt(64))
+            
+            # 计算比较边界（在64位无符号中不会溢出）
             # 对于 radix-4 SRT，商数字 q ∈ {-2, -1, 0, +1, +2}
+            # 由于被除数取了绝对值，P 始终非负，q 只能是 0, 1, 2
             # 选择规则：
             # q = +2 if P_high >= 2*D
             # q = +1 if P_high >= D and P_high < 2*D
-            # q = 0  if P_high >= 0 and P_high < D (or P_high >= -D and P_high < 0)
-            # q = -1 if P_high >= -2*D and P_high < -D
-            # q = -2 if P_high < -2*D
-            # 
-            # 但是对于非归一化的除法，我们需要更宽松的边界
-            # 使用标准 SRT 选择：基于 P 和 D 的比值
+            # q = 0  if P_high < D
             
-            two_D = (D_signed << Int(32)(1)).bitcast(Int(32))
-            neg_D = (~D_signed + Int(32)(1)).bitcast(Int(32))
-            neg_two_D = (~two_D + Int(32)(1)).bitcast(Int(32))
+            two_D_64 = (D_64_for_cmp << UInt(64)(1)).bitcast(UInt(64))
             
-            # 选择商数字 q_i
+            # 选择商数字 q_i（使用64位无符号比较）
             q_sel = Int(3)(0)
-            q_sel = (P_high_32 >= two_D).select(Int(3)(2), q_sel)         # q = +2
-            q_sel = ((P_high_32 >= D_signed) & (P_high_32 < two_D)).select(Int(3)(1), q_sel)    # q = +1
-            q_sel = ((P_high_32 >= Int(32)(0)) & (P_high_32 < D_signed)).select(Int(3)(0), q_sel)     # q = 0 (P >= 0)
-            q_sel = ((P_high_32 >= neg_D) & (P_high_32 < Int(32)(0))).select(Int(3)(0), q_sel)        # q = 0 (P < 0)
-            q_sel = ((P_high_32 >= neg_two_D) & (P_high_32 < neg_D)).select(Int(3)(-1), q_sel)   # q = -1
-            q_sel = (P_high_32 < neg_two_D).select(Int(3)(-2), q_sel)     # q = -2
+            q_sel = (P_high_64 >= two_D_64).select(Int(3)(2), q_sel)         # q = +2
+            q_sel = ((P_high_64 >= D_64_for_cmp) & (P_high_64 < two_D_64)).select(Int(3)(1), q_sel)    # q = +1
+            # q = 0 if P_high < D (default)
             
             # ========== 计算 q * D ==========
             # D 作为 64 位数的高 32 位（乘以 2^32）
@@ -1060,9 +1110,9 @@ class ExecuteStage(Module):
             new_Q_pos = q_is_negative.select(Q_pos_shifted, (Q_pos_shifted + q_abs.bitcast(UInt(32))).bitcast(UInt(32)))
             new_Q_neg = q_is_negative.select((Q_neg_shifted + q_abs.bitcast(UInt(32))).bitcast(UInt(32)), Q_neg_shifted)
             
-            # DEBUG: 打印迭代状态
-            # log("DIV ITER {}: P={:016x}, P_high={}, D={}, q={}, new_P={:016x}, Q+={}, Q-={}", 
-            #     iter_num, current_P, P_high_32, D, q_sel, new_P, new_Q_pos, new_Q_neg)
+            # DEBUG: 打印迭代状态（正式发布时注释掉）
+            # log("DIV ITER {}: P_high_64={}, D_64={}, 2D_64={}, q={}, Q+={}, Q-={}", 
+            #     iter_num, P_high_64, D_64_for_cmp, two_D_64, q_sel, new_Q_pos, new_Q_neg)
             
             # 检查是否完成16次迭代（在写入之前计算）
             iter_done = (iter_num >= UInt(5)(15))
@@ -1171,20 +1221,20 @@ class ExecuteStage(Module):
         #     log("EX BRANCH: PC={:08x}, taken={}, target={:08x}, rs1={:08x}, rs2={:08x}",
         #         pc_in, actual_taken, actual_target_pc, rs1_data, rs2_data)
 
-        # # 旧停止指令检测 (JAL x0, 0)
-        # with Condition(is_jump & (immediate_in == UInt(XLEN)(0))):
-        #     log("Finish Execution. The result is {}", reg_file[10])
-        #     finish()
+        # 旧停止指令检测 (JAL x0, 0)
+        with Condition(is_jump & (immediate_in == UInt(XLEN)(0))):
+            log("Finish Execution. The result is {}", reg_file[10])
+            finish()
         
         # 新停止指令检测: sb x0, -1(x0) = 0xFE000FA3
         # 特征: mem_write=1, store_type=00(SB), rs1=0, rs2=0, immediate=-1
-        store_type_ex = control_in[22:23]
-        is_finish_inst = (mem_write & (store_type_ex == UInt(2)(0)) & 
-                         (rs1_idx == UInt(5)(0)) & (rs2_idx == UInt(5)(0)) & 
-                         (immediate_in == UInt(XLEN)(0xFFFFFFFF)))
-        with Condition(is_finish_inst):
-            log("Finish Execution. The result is {}", reg_file[10])
-            finish()
+        # store_type_ex = control_in[22:23]
+        # is_finish_inst = (mem_write & (store_type_ex == UInt(2)(0)) & 
+        #                  (rs1_idx == UInt(5)(0)) & (rs2_idx == UInt(5)(0)) & 
+        #                  (immediate_in == UInt(XLEN)(0xFFFFFFFF)))
+        # with Condition(is_finish_inst):
+        #     log("Finish Execution. The result is {}", reg_file[10])
+        #     finish()
         
         # 乘法指令需要等待乘法完成才能传递到MEM阶段
         # 当乘法器正在执行(cycle 1或2)时，向MEM阶段传递NOP
@@ -1723,10 +1773,56 @@ class HazardUnit(Downstream):
         
         # id_ex_valid 的含义：EX阶段是否有有效指令需要执行
         # - need_flush时，EX阶段指令作废，设为0
-        # - data_hazard时，EX阶段指令仍然有效（只是IF/ID暂停），保持为1
-        # 但是！如果是因为mul_executing导致的data_hazard，说明乘法正在执行，
-        # 此时我们不应该再次启动乘法，所以对于新指令的启动检查应该用额外的信号
-        id_ex_valid[0] = (~data_hazard)
+        # - data_hazard时，EX阶段指令仍然有效（只是IF/ID暂停），保持原值
+        # 
+        # 修复：当 data_hazard=1 时，不应该无条件设置 id_ex_valid=0
+        # 而是应该：
+        # - need_flush=1: 设为 0（刷新流水线）
+        # - data_hazard=1 且 mul_executing/div_executing=1: 保持原值（等待多周期指令完成）
+        # - data_hazard=1 且 load_use_hazard=1: 设为 0（插入气泡）
+        # - 其他情况: 设为 1
+        #
+        # 重要：id_ex_valid 有两个作用：
+        # 1. 表示 EX 阶段是否有有效指令（用于 start_new_mul 等）
+        # 2. 控制 id_ex_control 等寄存器是否更新
+        # 
+        # 当 mul/div 执行中时，id_ex_valid 应该是 1（表示有有效指令等待），
+        # 但 id_ex_control 不应该被更新（保持等待的指令）。
+        # 
+        # 我们用 id_ex_update_enable 来区分：
+        # - id_ex_valid: 表示 EX 阶段是否有新指令需要启动执行
+        # - id_ex_update_enable: 控制 id_ex_control 等寄存器是否更新
+        # 
+        # 正确的逻辑：
+        # 当 mul/div 执行中时：
+        #   - id_ex_valid = 0（不启动新乘法）
+        #   - id_ex_update_enable = 0（不覆盖等待的 MULHU 指令）
+        # 当 mul/div 完成后的下一周期：
+        #   - id_ex_valid = 1（启动等待的 MULHU）
+        #   - id_ex_update_enable 可以是 1（但由于 id_ex_control 保持的是 MULHU，所以没问题）
+        
+        # 检测是否是 load-use 或其他需要插入气泡的冒险
+        need_bubble = (load_use_hazard_mem | sb_sh_stall)
+        
+        # 当 mul/div 执行中时，不要更新 id_ex 寄存器（保持等待的指令）
+        mul_div_stall = (mul_executing | div_executing)
+        
+        # id_ex_valid: 表示 EX 阶段是否有新指令需要启动执行
+        # - need_flush 时设为 0（刷新流水线）
+        # - need_bubble 时设为 0（插入 NOP）
+        # - mul_div_stall 时设为 0（等待多周期指令完成）
+        # - 其他情况设为 1
+        id_ex_valid[0] = need_flush.select(UInt(1)(0), 
+                            need_bubble.select(UInt(1)(0), 
+                                mul_div_stall.select(UInt(1)(0), UInt(1)(1))))
+        
+        # id_ex_update_enable: 控制 id_ex 寄存器是否更新
+        # - need_flush 时更新（写入 NOP）
+        # - need_bubble 时更新（写入 NOP）
+        # - mul_div_stall 时不更新（保持等待的指令）
+        # - 其他情况更新（写入新指令）
+        id_ex_update_enable = need_flush | need_bubble | (~mul_div_stall)
+        
         if_id_valid[0] = (~data_hazard)
         # ex_mem_valid: SB/SH stall时设为0，其他情况由正常流水线控制（默认1，flush时为0）
         ex_mem_valid[0] = (~sb_sh_stall)
@@ -1789,7 +1885,9 @@ class HazardUnit(Downstream):
         with Condition(if_id_valid[0]):
             if_id_instruction[0] = need_flush.select(UInt(XLEN)(0x00000013), instruction)  # NOP指令
             if_id_prediction_info[0] = need_flush.select(UInt(PREDICTION_INFO_LEN)(0), prediction_info_id)
-        with Condition(id_ex_valid[0]):
+        # 使用 id_ex_update_enable 而不是 id_ex_valid 来控制寄存器更新
+        # 这样在 mul/div 执行中时不会覆盖等待的指令
+        with Condition(id_ex_update_enable):
             id_ex_control[0] = need_flush.select(nop_control, control_in)
             id_ex_immediate[0] = need_flush.select(UInt(XLEN)(0), immediate)
             id_ex_rs1_idx[0] = need_flush.select(UInt(5)(0), rs1)
@@ -1899,6 +1997,7 @@ def build_cpu(program_file="test_program.txt"):
         mul_rd_reg = RegArray(UInt(5), 1, initializer=[0])            # 乘法目标寄存器
         mul_control_reg = RegArray(UInt(CONTROL_LEN), 1, initializer=[0])  # 乘法控制信号
         mul_pc_reg = RegArray(UInt(XLEN), 1, initializer=[0])         # 乘法指令PC
+        mul_result_sign = RegArray(UInt(1), 1, initializer=[0])       # 乘法结果符号 (符号转换法)
         
         # ==================== 除法器寄存器 ====================
         # Radix-4 SRT 不恢复除法器流水线寄存器（带查表）
@@ -1947,7 +2046,7 @@ def build_cpu(program_file="test_program.txt"):
         # 按照流水线顺序构建模块
         writeback_signals = writeback_stage.build(mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, mem_wb_control, mem_wb_addr, reg_file, data_sram)
         memory_signals = memory_stage.build(ex_mem_valid, ex_mem_result, ex_mem_pc, ex_mem_data, ex_mem_control, mem_wb_control, mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, mem_wb_addr, sb_sh_state, sb_sh_addr, sb_sh_data, sb_sh_type, writeback_stage, data_sram)
-        execute_signals = execute_stage.build(id_ex_valid, id_ex_pc, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_control, id_ex_prediction_info, ex_mem_pc, ex_mem_control, ex_mem_valid, ex_mem_result, ex_mem_data, reg_file, memory_stage, mem_wb_control, mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, data_sram, mem_wb_addr, ex_mem_pc_change, ex_mem_target_pc, ex_mem_prediction_result, ex_sig_control, mul_a, mul_b, mul_op_reg, mul_start, mul_cycle_counter, mul_stage1_sum, mul_stage1_carry, mul_stage2_sum, mul_stage2_carry, mul_valid, mul_result_reg, mul_in_progress, mul_rd_reg, mul_control_reg, mul_pc_reg, div_dividend, div_divisor, div_op_reg, div_state, div_remainder, div_quotient_pos, div_quotient_neg, div_iter_count, div_sign, div_dividend_sign, div_valid, div_result_reg, div_rd_reg, div_control_reg, div_pc_reg, div_norm_shift, div_divisor_norm)
+        execute_signals = execute_stage.build(id_ex_valid, id_ex_pc, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_control, id_ex_prediction_info, ex_mem_pc, ex_mem_control, ex_mem_valid, ex_mem_result, ex_mem_data, reg_file, memory_stage, mem_wb_control, mem_wb_valid, mem_wb_mem_data, mem_wb_ex_result, data_sram, mem_wb_addr, ex_mem_pc_change, ex_mem_target_pc, ex_mem_prediction_result, ex_sig_control, mul_a, mul_b, mul_op_reg, mul_start, mul_cycle_counter, mul_stage1_sum, mul_stage1_carry, mul_stage2_sum, mul_stage2_carry, mul_valid, mul_result_reg, mul_in_progress, mul_rd_reg, mul_control_reg, mul_pc_reg, mul_result_sign, div_dividend, div_divisor, div_op_reg, div_state, div_remainder, div_quotient_pos, div_quotient_neg, div_iter_count, div_sign, div_dividend_sign, div_valid, div_result_reg, div_rd_reg, div_control_reg, div_pc_reg, div_norm_shift, div_divisor_norm)
         decode_signals = decode_stage.build(if_id_valid, if_id_pc, if_id_instruction, if_id_prediction_info, id_ex_pc, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_need_rs1, id_ex_need_rs2, id_ex_prediction_info, reg_file, execute_stage)
         fetch_signals = fetch_stage.build(pc, stall, if_id_pc, if_id_instruction, if_id_valid, if_id_prediction_info, instruction_memory, btb, bht, btb_valid, decode_stage)
         hazard_unit.build(pc, stall, if_id_valid, if_id_instruction, if_id_prediction_info, id_ex_control, id_ex_valid, id_ex_rs1_idx, id_ex_rs2_idx, id_ex_immediate, id_ex_prediction_info, ex_mem_valid, mem_wb_valid, btb, bht, btb_valid, fetch_signals, decode_signals, execute_signals, memory_signals, writeback_signals, mul_in_progress, mul_cycle_counter, mul_rd_reg, div_state, div_iter_count, div_rd_reg)
