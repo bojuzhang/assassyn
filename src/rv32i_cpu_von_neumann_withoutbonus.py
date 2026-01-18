@@ -532,6 +532,24 @@ class UnifiedControlUnit(Downstream):
         writeback_signals = writeback_signals.optional(Bits(CONTROL_LEN)(0))
         
         # ==================== 数据冒险检测 ====================
+        # 
+        # 关键：数据冒险检测需要基于【实际将要进入EX阶段的指令】
+        # 如果 pending buffer 中有指令（pending_valid[0]=1），那才是下一个要进入 EX 的指令
+        # 否则才使用当前 IF/ID 中的指令
+        # 
+        # 这个修复解决了以下问题：
+        # 当从 pending buffer 恢复指令时，如果该指令仍有数据冒险，
+        # 应该继续等待而不是把它再次保存然后再恢复（导致无限循环）
+        
+        # 读取 pending buffer 的状态（这里先读，后面会用到）
+        has_pending_early = pending_valid[0]
+        
+        # 选择实际要进行冒险检测的指令
+        # 如果有 pending 指令，使用 pending 中的；否则使用当前解码的
+        check_rs1 = has_pending_early.select(pending_rs1_idx[0], rs1)
+        check_rs2 = has_pending_early.select(pending_rs2_idx[0], rs2)
+        check_needs_rs1 = has_pending_early.select(pending_need_rs1[0], needs_rs1)
+        check_needs_rs2 = has_pending_early.select(pending_need_rs2[0], needs_rs2)
         
         # 计算EX->MEM的控制信号（用于数据冒险检测）
         memory_control = execute_signals[XLEN + 1:XLEN + 1 + CONTROL_LEN - 1].bitcast(UInt(CONTROL_LEN))
@@ -545,12 +563,12 @@ class UnifiedControlUnit(Downstream):
         rd_wb = wb_control[25:29]
         reg_write_wb = wb_control[7:7]
         
-        # 数据冒险检测
+        # 数据冒险检测（使用选择后的指令信息）
         data_hazard_ex = UInt(1)(0)
         data_hazard_wb = UInt(1)(0)
         
-        data_hazard_ex = (reg_write_mem & ((needs_rs1 & (rs1 == rd_mem)) | (needs_rs2 & (rs2 == rd_mem)))).select(UInt(1)(1), data_hazard_ex)
-        data_hazard_wb = (reg_write_wb & ((needs_rs1 & (rs1 == rd_wb)) | (needs_rs2 & (rs2 == rd_wb)))).select(UInt(1)(1), data_hazard_wb)
+        data_hazard_ex = (reg_write_mem & ((check_needs_rs1 & (check_rs1 == rd_mem)) | (check_needs_rs2 & (check_rs2 == rd_mem)))).select(UInt(1)(1), data_hazard_ex)
+        data_hazard_wb = (reg_write_wb & ((check_needs_rs1 & (check_rs1 == rd_wb)) | (check_needs_rs2 & (check_rs2 == rd_wb)))).select(UInt(1)(1), data_hazard_wb)
         
         # 综合数据冒险信号
         data_hazard = ((data_hazard_ex | data_hazard_wb) & ~pc_change)
@@ -636,21 +654,47 @@ class UnifiedControlUnit(Downstream):
         # 
         # 解决方案：使用 if_pending_* 缓冲区保存取到但未能进入 IF/ID 的指令
         # 
+        # 关键理解：
+        # - pending buffer 保存 ID 阶段的指令（从 IF/ID 来）
+        # - if_pending buffer 保存 IF 阶段取到的指令（从 SRAM 来）
+        # 
+        # 当 use_pending=1 时（从 pending 恢复指令到 ID/EX）：
+        # - pending 中的指令进入 ID/EX
+        # - IF/ID 需要更新为下一条指令：
+        #   - 如果有 if_pending，从 if_pending 恢复
+        #   - 如果有 if_fetch_success，用新取到的指令
+        #   - 否则插入 NOP
+        # 
         # 逻辑：
         # 1. pc_change=1 -> 插入NOP，清空 if_pending
         # 2. data_hazard=1 且 if_fetch_success=1 且 if_pending_valid=0 -> 保存到 if_pending
-        # 3. ~data_hazard 且 if_pending_valid=1 -> 从 if_pending 恢复到 IF/ID
-        # 4. ~data_hazard 且 if_pending_valid=0 且 if_fetch_success=1 -> 正常更新 IF/ID
-        # 5. ~data_hazard 且 fetch_stall=1 且 if_pending_valid=0 -> 插入NOP
+        # 3. data_hazard=1 且 ~if_fetch_success -> IF/ID 保持不变
+        # 4. use_pending=1 时（data_hazard=0 且 pending_valid=1）：
+        #    - 如果有 if_pending -> 从 if_pending 恢复到 IF/ID
+        #    - 否则如果有 if_fetch_success -> 用新指令更新 IF/ID
+        #    - 否则 -> 插入 NOP
+        # 5. ~data_hazard 且 ~use_pending:
+        #    - 如果有 if_pending -> 从 if_pending 恢复
+        #    - 否则如果有 if_fetch_success -> 正常更新
+        #    - 否则 -> 插入 NOP
         
         # 读取 if_pending 状态（上一周期的值）
         has_if_pending = if_pending_valid[0]
         
+        # 预先计算 use_pending（与下面 ID/EX 更新部分使用相同逻辑）
+        need_bubble_for_check = (pc_change | data_hazard)
+        use_pending_for_check = (~need_bubble_for_check) & has_pending_early
+        
         # 计算更新条件
-        should_save_to_if_pending = (~pc_change) & data_hazard & if_fetch_success & (~has_if_pending)
+        # 只有当取到的指令是"新"指令（PC 与当前 IF/ID 不同）时才保存到 if_pending
+        # 这避免了 data_hazard 时重复保存同一条指令
+        fetched_new_instruction = (if_fetching_pc_val != if_id_pc[0])
+        should_save_to_if_pending = (~pc_change) & data_hazard & if_fetch_success & (~has_if_pending) & fetched_new_instruction
+        # 从 if_pending 恢复的条件：没有控制冒险，没有数据冒险，有 if_pending
         should_restore_from_if_pending = (~pc_change) & (~data_hazard) & has_if_pending
+        # 正常更新的条件：没有控制/数据冒险，没有 if_pending，有新取到的指令
         should_update_if_id_normal = (~pc_change) & (~data_hazard) & (~has_if_pending) & if_fetch_success
-        # 只有在没有 pending 指令且没有新取到指令时才插入 NOP
+        # 插入 NOP 的条件：没有控制/数据冒险，没有 if_pending，没有新指令
         should_insert_nop_if_id = (~pc_change) & (~data_hazard) & (~has_if_pending) & (~if_fetch_success)
         
         log("IF_ID_UPDATE: pc_change={}, data_hazard={}, if_fetch_success={}, has_if_pending={}, if_instruction={:08x}, if_fetching_pc={:08x}",
@@ -718,8 +762,8 @@ class UnifiedControlUnit(Downstream):
         
         need_bubble = (pc_change | data_hazard)
         
-        # 从 pending 缓冲区读取（上一周期写入的值）
-        has_pending = pending_valid[0]
+        # 使用之前已经读取的 pending_valid（has_pending_early）
+        has_pending = has_pending_early
         
         # 决定写入 ID/EX 的数据源
         # 当冒险解除时，如果有 pending 指令，使用 pending；否则使用当前解码结果
@@ -977,7 +1021,7 @@ def test_rv32i_cpu(program_file="test_program.txt"):
     sys = build_cpu(program_file)
     
     # 生成模拟器
-    simulator_path, _ = elaborate(sys, verilog=False, sim_threshold=10000, resource_base='.')
+    simulator_path, _ = elaborate(sys, verilog=False, sim_threshold=50000, resource_base='.')
     raw = utils.run_simulator(simulator_path)
     with open("result.out", 'w', encoding='utf-8') as f:
         print(raw, file=f)

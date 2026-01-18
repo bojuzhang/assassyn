@@ -332,7 +332,17 @@ class ExecuteStage(Module):
         target_pc = is_jumpr.select(new_pc.bitcast(UInt(32)), target_pc)
         pc_change = (branch_result.bitcast(Bits(1)) | is_jump | is_jumpr).select(UInt(1)(1), pc_change)
 
-        with Condition(is_jump & (immediate_in == UInt(XLEN)(0))):
+        # with Condition(is_jump & (immediate_in == UInt(XLEN)(0))):
+        #     log("Finish Execution. The result is {}", reg_file[10])
+        #     finish()
+
+        #新停止指令检测: sb x0, -1(x0) = 0xFE000FA3
+        # 特征: mem_write=1, store_type=00(SB), rs1=0, rs2=0, immediate=-1
+        store_type_ex = control_in[22:23]
+        is_finish_inst = (mem_write & (store_type_ex == UInt(2)(0)) & 
+                         (rs1_idx == UInt(5)(0)) & (rs2_idx == UInt(5)(0)) & 
+                         (immediate_in == UInt(XLEN)(0xFFFFFFFF)))
+        with Condition(is_finish_inst):
             log("Finish Execution. The result is {}", reg_file[10])
             finish()
         

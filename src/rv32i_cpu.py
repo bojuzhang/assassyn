@@ -1043,7 +1043,7 @@ class ExecuteStage(Module):
         # 1. 先左移 2 位（乘以 4）
         # 2. 根据部分余数的高位选择商数字 q_i ∈ {-2, -1, 0, +1, +2}
         # 3. 更新部分余数: P_{i+1} = P_shifted - q_i * D
-        # 4. On-the-fly 更新商: Q+, Q-
+        # 4. 更新商: Q+, Q-
         # 
         # 定点格式：
         # - P 是 64 位有符号数
@@ -1065,36 +1065,34 @@ class ExecuteStage(Module):
             
             # ========== 商数字选择（基于 P 和 D 的比较）==========
             # P_shifted 是 64 位，取高 32 位进行比较
-            # P_high = P_shifted[32:63]
-            # 
-            # 关键修复：对于无符号除法，P 始终为正，使用无符号比较
-            # 对于有符号除法，P 可能为负，使用有符号比较
-            # 
-            # 但在当前实现中，我们对被除数取了绝对值，所以 P 始终为正
-            # 因此应该使用无符号比较
+            # P_high = P_shifted[32:63]（有符号 32 位）
+            P_high_32 = P_shifted[32:63].bitcast(Int(32))
+            D_signed = D.bitcast(Int(32))
             
-            P_high_32 = P_shifted[32:63].bitcast(UInt(32))
-            # 将 P_high 零扩展到 64 位（无符号）
-            P_high_64 = P_high_32.zext(UInt(64))
-            
-            # 将 D 零扩展到 64 位（D 是绝对值，始终非负）
-            D_64_for_cmp = D.zext(UInt(64))
-            
-            # 计算比较边界（在64位无符号中不会溢出）
+            # 计算比较边界
             # 对于 radix-4 SRT，商数字 q ∈ {-2, -1, 0, +1, +2}
-            # 由于被除数取了绝对值，P 始终非负，q 只能是 0, 1, 2
             # 选择规则：
             # q = +2 if P_high >= 2*D
             # q = +1 if P_high >= D and P_high < 2*D
-            # q = 0  if P_high < D
+            # q = 0  if P_high >= 0 and P_high < D (or P_high >= -D and P_high < 0)
+            # q = -1 if P_high >= -2*D and P_high < -D
+            # q = -2 if P_high < -2*D
+            # 
+            # 但是对于非归一化的除法，我们需要更宽松的边界
+            # 使用标准 SRT 选择：基于 P 和 D 的比值
             
-            two_D_64 = (D_64_for_cmp << UInt(64)(1)).bitcast(UInt(64))
+            two_D = (D_signed << Int(32)(1)).bitcast(Int(32))
+            neg_D = (~D_signed + Int(32)(1)).bitcast(Int(32))
+            neg_two_D = (~two_D + Int(32)(1)).bitcast(Int(32))
             
-            # 选择商数字 q_i（使用64位无符号比较）
+            # 选择商数字 q_i
             q_sel = Int(3)(0)
-            q_sel = (P_high_64 >= two_D_64).select(Int(3)(2), q_sel)         # q = +2
-            q_sel = ((P_high_64 >= D_64_for_cmp) & (P_high_64 < two_D_64)).select(Int(3)(1), q_sel)    # q = +1
-            # q = 0 if P_high < D (default)
+            q_sel = (P_high_32 >= two_D).select(Int(3)(2), q_sel)         # q = +2
+            q_sel = ((P_high_32 >= D_signed) & (P_high_32 < two_D)).select(Int(3)(1), q_sel)    # q = +1
+            q_sel = ((P_high_32 >= Int(32)(0)) & (P_high_32 < D_signed)).select(Int(3)(0), q_sel)     # q = 0 (P >= 0)
+            q_sel = ((P_high_32 >= neg_D) & (P_high_32 < Int(32)(0))).select(Int(3)(0), q_sel)        # q = 0 (P < 0)
+            q_sel = ((P_high_32 >= neg_two_D) & (P_high_32 < neg_D)).select(Int(3)(-1), q_sel)   # q = -1
+            q_sel = (P_high_32 < neg_two_D).select(Int(3)(-2), q_sel)     # q = -2
             
             # ========== 计算 q * D ==========
             # D 作为 64 位数的高 32 位（乘以 2^32）
@@ -1114,7 +1112,6 @@ class ExecuteStage(Module):
             # P_{i+1} = 4 * P_i - q_i * D = P_shifted - qD
             new_P = (P_shifted - qD).bitcast(Int(64))
             
-            # ========== On-the-fly 商转换 ==========
             # 更新 Q+ 和 Q-
             # 如果 q >= 0: Q+ = Q+ * 4 + q, Q- = Q- * 4
             # 如果 q < 0:  Q+ = Q+ * 4, Q- = Q- * 4 + |q|
@@ -1134,9 +1131,9 @@ class ExecuteStage(Module):
             new_Q_pos = q_is_negative.select(Q_pos_shifted, (Q_pos_shifted + q_abs.bitcast(UInt(32))).bitcast(UInt(32)))
             new_Q_neg = q_is_negative.select((Q_neg_shifted + q_abs.bitcast(UInt(32))).bitcast(UInt(32)), Q_neg_shifted)
             
-            # DEBUG: 打印迭代状态（正式发布时注释掉）
-            # log("DIV ITER {}: P_high_64={}, D_64={}, 2D_64={}, q={}, Q+={}, Q-={}", 
-            #     iter_num, P_high_64, D_64_for_cmp, two_D_64, q_sel, new_Q_pos, new_Q_neg)
+            # DEBUG: 打印迭代状态
+            # log("DIV ITER {}: P={:016x}, P_high={}, D={}, q={}, new_P={:016x}, Q+={}, Q-={}", 
+            #     iter_num, current_P, P_high_32, D, q_sel, new_P, new_Q_pos, new_Q_neg)
             
             # 检查是否完成16次迭代（在写入之前计算）
             iter_done = (iter_num >= UInt(5)(15))
