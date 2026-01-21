@@ -28,14 +28,14 @@ class FetchStage(Module):
         word_addr = current_pc >> UInt(XLEN)(2)
         instruction = UInt(XLEN)(0)
 
-        log("IF_ID_VALID={}", if_id_valid[0])
+        # log("IF_ID_VALID={}", if_id_valid[0])
 
         instruction = instruction_memory[word_addr]
         with Condition(if_id_valid[0]):
             if_id_pc[0] = stall[0].select(UInt(XLEN)(0), current_pc)
             # if_id_instruction[0] = stall[0].select(UInt(XLEN)(0), instruction)
             if_id_valid[0] = stall[0].select(UInt(1)(0), UInt(1)(1))
-            log("IF: PC={:08x}, Instruction={:08x}", current_pc, instruction)
+            # log("IF: PC={:08x}, Instruction={:08x}", current_pc, instruction)
 
         decode_stage.async_called()
 
@@ -53,7 +53,7 @@ class DecodeStage(Module):
         if_id_pc_in = if_id_pc[0]
         instruction = if_id_instruction[0]
 
-        log("Instruction={:08x}", instruction)
+        # log("Instruction={:08x}", instruction)
         
         # 如果指令无效，直接返回，不更新ID/EX寄存器
         opcode = instruction[0:6]          # bits 6:0
@@ -211,8 +211,8 @@ class DecodeStage(Module):
             # id_ex_rs2_idx[0] = rs2
             # id_ex_immediate[0] = immediate
             
-            log("ID: PC={}, Opcode={:07b}, RD={}, RS1={}, RS2={}, Immediate={}, Alu_op={}, Branch_op={}, Jump_op={}, Alu_src={}, Mem_read={}, Mem_write={}, Reg_write={}, Mem_to_reg={}, Control={:042b}",
-                if_id_pc_in, opcode, rd, rs1, rs2, immediate, alu_op, branch_op, jump_op, alu_src, mem_read, mem_write, reg_write, mem_to_reg, control_signals)
+            # log("ID: PC={}, Opcode={:07b}, RD={}, RS1={}, RS2={}, Immediate={}, Alu_op={}, Branch_op={}, Jump_op={}, Alu_src={}, Mem_read={}, Mem_write={}, Reg_write={}, Mem_to_reg={}, Control={:042b}",
+            #     if_id_pc_in, opcode, rd, rs1, rs2, immediate, alu_op, branch_op, jump_op, alu_src, mem_read, mem_write, reg_write, mem_to_reg, control_signals)
         
         # rs1 = (~if_id_valid[0]).select(Bits(5)(0), rs1)
         # rs2 = (~if_id_valid[0]).select(Bits(5)(0), rs2)
@@ -257,8 +257,8 @@ class ExecuteStage(Module):
         result = (op == UInt(5)(0b01000)).select((a | b).bitcast(UInt(XLEN)), result)  # OR
         result = (op == UInt(5)(0b01001)).select((a & b).bitcast(UInt(XLEN)), result)  # AND
         
-        log("ALU: OP={:05b}, A={:08x}, B={:08x}, Result={:08x}",
-            op, a, b, result)
+        # log("ALU: OP={:05b}, A={:08x}, B={:08x}, Result={:08x}",
+        #     op, a, b, result)
         
         return result
 
@@ -274,8 +274,8 @@ class ExecuteStage(Module):
         taken = (op == UInt(3)(0b101)).select((a < b).select(UInt(1)(1), UInt(1)(0)), taken)  # BLTU
         taken = (op == UInt(3)(0b110)).select((a >= b).select(UInt(1)(1), UInt(1)(0)), taken)  # BGEU
         
-        log("BRANCH: OP={:03b}, A={:08x}, B={:08x}, Taken={}",
-            op, a, b, taken)
+        # log("BRANCH: OP={:03b}, A={:08x}, B={:08x}, Taken={}",
+        #     op, a, b, taken)
         
         return taken
 
@@ -332,19 +332,19 @@ class ExecuteStage(Module):
         target_pc = is_jumpr.select(new_pc.bitcast(UInt(32)), target_pc)
         pc_change = (branch_result.bitcast(Bits(1)) | is_jump | is_jumpr).select(UInt(1)(1), pc_change)
 
-        # with Condition(is_jump & (immediate_in == UInt(XLEN)(0))):
-        #     log("Finish Execution. The result is {}", reg_file[10])
-        #     finish()
-
-        #新停止指令检测: sb x0, -1(x0) = 0xFE000FA3
-        # 特征: mem_write=1, store_type=00(SB), rs1=0, rs2=0, immediate=-1
-        store_type_ex = control_in[22:23]
-        is_finish_inst = (mem_write & (store_type_ex == UInt(2)(0)) & 
-                         (rs1_idx == UInt(5)(0)) & (rs2_idx == UInt(5)(0)) & 
-                         (immediate_in == UInt(XLEN)(0xFFFFFFFF)))
-        with Condition(is_finish_inst):
+        with Condition(is_jump & (immediate_in == UInt(XLEN)(0))):
             log("Finish Execution. The result is {}", reg_file[10])
             finish()
+
+        # # 新停止指令检测: sb x0, -1(x0) = 0xFE000FA3
+        # # 特征: mem_write=1, store_type=00(SB), rs1=0, rs2=0, immediate=-1
+        # store_type_ex = control_in[22:23]
+        # is_finish_inst = (mem_write & (store_type_ex == UInt(2)(0)) & 
+        #                  (rs1_idx == UInt(5)(0)) & (rs2_idx == UInt(5)(0)) & 
+        #                  (immediate_in == UInt(XLEN)(0xFFFFFFFF)))
+        # with Condition(is_finish_inst):
+        #     log("Finish Execution. The result is {}", reg_file[10])
+        #     finish()
         
 
         with Condition(ex_mem_valid[0]):
@@ -354,8 +354,8 @@ class ExecuteStage(Module):
             ex_mem_result[0] = id_ex_valid[0].select(alu_result, UInt(XLEN)(0))
             ex_mem_data[0] = id_ex_valid[0].select(rs2_data, UInt(XLEN)(0))
             
-            log("EX: PC={}, ALU_OP={:05b}, ALU_A={}, ALU_B={}, Result={:08x}, PC_Change={}, Target_PC={:08x}, Immediate={:08x}, ALU_SRC={}",
-                pc_in, alu_op, alu_a, alu_b, alu_result, pc_change, target_pc, immediate_in, alu_src)
+            # log("EX: PC={}, ALU_OP={:05b}, ALU_A={}, ALU_B={}, Result={:08x}, PC_Change={}, Target_PC={:08x}, Immediate={:08x}, ALU_SRC={}",
+            #     pc_in, alu_op, alu_a, alu_b, alu_result, pc_change, target_pc, immediate_in, alu_src)
         
         memory_stage.async_called()
 
@@ -403,8 +403,8 @@ class MemoryStage(Module):
             # mem_wb_valid[0] = ex_mem_valid[0].select(UInt(1)(1), UInt(1)(0))
             mem_wb_ex_result[0] = ex_mem_valid[0].select(ex_mem_result[0], UInt(XLEN)(0))
             
-            log("MEM: PC={}, Addr={:08x}, Read={}, Write={}, data_in={}, data_out={}",
-                pc_in, addr_in, mem_read, mem_write, data_in, data_sram.dout[0])
+            # log("MEM: PC={}, Addr={:08x}, Read={}, Write={}, data_in={}, data_out={}",
+            #     pc_in, addr_in, mem_read, mem_write, data_in, data_sram.dout[0])
 
 
         writeback_stage.async_called()
@@ -436,8 +436,8 @@ class WriteBackStage(Module):
         with Condition(mem_wb_valid[0]):
             with Condition(reg_write):
                 reg_file[wb_rd] = wb_data
-            log("WB: Write_Data={}, RD={}, WE={}",
-                wb_data, wb_rd, reg_write)
+            # log("WB: Write_Data={}, RD={}, WE={}",
+            #     wb_data, wb_rd, reg_write)
 
         writeback_signals = control_in.bitcast(Bits(CONTROL_LEN))
         return writeback_signals
@@ -503,10 +503,10 @@ class HazardUnit(Downstream):
             id_ex_rs1_idx[0] = pc_change.select(UInt(5)(0), rs1)
             id_ex_rs2_idx[0] = pc_change.select(UInt(5)(0), rs2)
 
-        log("RD_MEM={}, REG_WRITE_MEM={}, RD_WB={}, REG_WRITE_WB={}",
-            rd_mem, reg_write_mem, rd_wb, reg_write_wb)
-        log("Hazard Unit: Data_Hazard={}, PC_Change={}, Target_PC={:08x}, IF_ID_VALID={}, ID_EX_VALID={}, Immediate={:08x}, RS1={}, RS2={}, Control={:042b}",
-            data_hazard, pc_change, target_pc, if_id_valid[0], id_ex_valid[0], immediate, rs1, rs2, control_in)
+        # log("RD_MEM={}, REG_WRITE_MEM={}, RD_WB={}, REG_WRITE_WB={}",
+        #     rd_mem, reg_write_mem, rd_wb, reg_write_wb)
+        # log("Hazard Unit: Data_Hazard={}, PC_Change={}, Target_PC={:08x}, IF_ID_VALID={}, ID_EX_VALID={}, Immediate={:08x}, RS1={}, RS2={}, Control={:042b}",
+        #     data_hazard, pc_change, target_pc, if_id_valid[0], id_ex_valid[0], immediate, rs1, rs2, control_in)
 
 # ==================== 顶层CPU模块 ===================
 class Driver(Module):
@@ -590,7 +590,7 @@ def build_cpu(program_file="test_program.txt"):
         pc = RegArray(UInt(XLEN), 1, initializer=[0])
         stall = RegArray(UInt(1), 1, initializer=[0])
         
-        data_sram = SRAM(width=XLEN, depth=65536, init_file="data.hex")
+        data_sram = SRAM(width=XLEN, depth=0x40000, init_file="data.hex")
         hazard_unit = HazardUnit()
         fetch_stage = FetchStage()
         decode_stage = DecodeStage()
@@ -617,7 +617,7 @@ def test_rv32i_cpu(program_file="test_program.txt"):
     sys = build_cpu(program_file)
     
     # 生成模拟器
-    simulator_path, _ = elaborate(sys, verilog=False, sim_threshold=2500, resource_base='.')
+    simulator_path, _ = elaborate(sys, verilog=False, sim_threshold=500000, resource_base='.')
     raw = utils.run_simulator(simulator_path)
     with open("result.out", 'w', encoding='utf-8') as f:
         print(raw, file=f)

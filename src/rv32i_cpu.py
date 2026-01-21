@@ -151,7 +151,7 @@ class FetchStage(Module):
             if_id_pc[0] = stall[0].select(UInt(XLEN)(0), current_pc)
             if_id_valid[0] = stall[0].select(UInt(1)(0), UInt(1)(1))
             if_id_prediction_info[0] = stall[0].select(UInt(PREDICTION_INFO_LEN)(0), prediction_info)
-            log("IF: PC={:08x}, Instruction={:08x}", current_pc, instruction)
+            # log("IF: PC={:08x}, Instruction={:08x}", current_pc, instruction)
 
         decode_stage.async_called()
 
@@ -174,7 +174,7 @@ class DecodeStage(Module):
         instruction = if_id_instruction[0]
         prediction_info_in = if_id_prediction_info[0]
 
-        log("ID: PC={:08x}, Instruction={:08x}", if_id_pc_in, instruction)
+        # log("ID: PC={:08x}, Instruction={:08x}", if_id_pc_in, instruction)
         
         # 如果指令无效，直接返回，不更新ID/EX寄存器
         opcode = instruction[0:6]          # bits 6:0
@@ -248,8 +248,8 @@ class DecodeStage(Module):
         
         # 是否为除法指令
         is_div_inst = (div_op != UInt(3)(DIV_OP_NONE))
-        log("ID DECODE: opcode={:07b}, funct7={:07b}, func3={:03b}, is_r_type={}, is_m_ext={}, mul_op={}, is_mul_inst={}", 
-            opcode, funct7, func3, is_r_type, is_m_ext, mul_op, is_mul_inst)
+        # log("ID DECODE: opcode={:07b}, funct7={:07b}, func3={:03b}, is_r_type={}, is_m_ext={}, mul_op={}, is_mul_inst={}", 
+        #     opcode, funct7, func3, is_r_type, is_m_ext, mul_op, is_mul_inst)
         
         alu_op_tmp = UInt(5)(0)
         alu_op_tmp = ((is_r_type & funct7[5:5] == UInt(1)(1)) & (func3 == UInt(3)(0b000))).select(UInt(5)(0b00001), alu_op_tmp)  # SUB
@@ -591,12 +591,12 @@ class ExecuteStage(Module):
         rs2_data = rs2_forward_wb.select(wb_data, rs2_data)
         rs2_data = rs2_forward_mem.select(mem_result, rs2_data)
         
-        log("EX FORWARD: PC={:08x}, rs1_idx={}, rs2_idx={}, rs1_fwd_mem={}, rs1_fwd_wb={}, rs2_fwd_mem={}, rs2_fwd_wb={}",
-            pc_in, rs1_idx, rs2_idx, rs1_forward_mem, rs1_forward_wb, rs2_forward_mem, rs2_forward_wb)
-        log("EX FORWARD DATA: rs1_reg={:08x}, rs2_reg={:08x}, mem_result={:08x}, wb_data={:08x}, rs1_data={:08x}, rs2_data={:08x}",
-            rs1_reg, rs2_reg, mem_result, wb_data, rs1_data, rs2_data)
-        log("EX FORWARD COND: ex_mem_valid={}, mem_wb_valid={}, mem_rd={}, wb_rd={}, mem_reg_write={}, wb_reg_write={}",
-            ex_mem_valid[0], mem_wb_valid[0], mem_rd, wb_rd, mem_reg_write, wb_reg_write)
+        # log("EX FORWARD: PC={:08x}, rs1_idx={}, rs2_idx={}, rs1_fwd_mem={}, rs1_fwd_wb={}, rs2_fwd_mem={}, rs2_fwd_wb={}",
+        #     pc_in, rs1_idx, rs2_idx, rs1_forward_mem, rs1_forward_wb, rs2_forward_mem, rs2_forward_wb)
+        # log("EX FORWARD DATA: rs1_reg={:08x}, rs2_reg={:08x}, mem_result={:08x}, wb_data={:08x}, rs1_data={:08x}, rs2_data={:08x}",
+        #     rs1_reg, rs2_reg, mem_result, wb_data, rs1_data, rs2_data)
+        # log("EX FORWARD COND: ex_mem_valid={}, mem_wb_valid={}, mem_rd={}, wb_rd={}, mem_reg_write={}, wb_reg_write={}",
+        #     ex_mem_valid[0], mem_wb_valid[0], mem_rd, wb_rd, mem_reg_write, wb_reg_write)
         
         # 初始化PC变化控制信号
         pc_change = UInt(1)(0)
@@ -685,8 +685,8 @@ class ExecuteStage(Module):
         # 当前是否需要启动新的乘法
         # 只有当乘法器空闲且当前指令是乘法指令时才启动
         start_new_mul = (is_mul_inst & id_ex_valid[0] & ~mul_busy).select(UInt(1)(1), UInt(1)(0))
-        log("MUL CHECK: is_mul_inst={}, id_ex_valid={}, mul_busy={}, mul_op={}, control_mul_op={}, start_new_mul={}", 
-            is_mul_inst, id_ex_valid[0], mul_busy, mul_op, control_in[42:44], start_new_mul)
+        # log("MUL CHECK: is_mul_inst={}, id_ex_valid={}, mul_busy={}, mul_op={}, control_mul_op={}, start_new_mul={}", 
+        #     is_mul_inst, id_ex_valid[0], mul_busy, mul_op, control_in[42:44], start_new_mul)
         
         # 保存乘法操作数和控制信息
         with Condition(start_new_mul):
@@ -706,7 +706,7 @@ class ExecuteStage(Module):
             a = mul_a[0]
             b = mul_b[0]
             saved_op = mul_op_reg[0]
-            log("MUL CYCLE 1: a={:08x}, b={:08x}, saved_op={}", a, b, saved_op)
+            # log("MUL CYCLE 1: a={:08x}, b={:08x}, saved_op={}", a, b, saved_op)
             
             # ==================== 符号转换法 ====================
             # 步骤1: 确定操作数符号属性
@@ -737,9 +737,9 @@ class ExecuteStage(Module):
             a_abs = a_negative.select(a_abs_temp, a)
             b_abs = b_negative.select(b_abs_temp, b)
             
-            log("MUL SIGN CONV: a_sign={}, b_sign={}, a_is_signed={}, b_is_signed={}, a_negative={}, b_negative={}, result_sign={}", 
-                a_sign, b_sign, a_is_signed, b_is_signed, a_negative, b_negative, result_sign)
-            log("MUL ABS: a_abs={:08x}, b_abs={:08x}", a_abs, b_abs)
+            # log("MUL SIGN CONV: a_sign={}, b_sign={}, a_is_signed={}, b_is_signed={}, a_negative={}, b_negative={}, result_sign={}", 
+            #     a_sign, b_sign, a_is_signed, b_is_signed, a_negative, b_negative, result_sign)
+            # log("MUL ABS: a_abs={:08x}, b_abs={:08x}", a_abs, b_abs)
             
             # 步骤6: 对绝对值进行零扩展到64位 (无符号乘法)
             a_64 = concat(UInt(32)(0), a_abs).bitcast(UInt(64))
@@ -893,10 +893,10 @@ class ExecuteStage(Module):
             need_negate = (saved_sign & ~is_unsigned_only).select(UInt(1)(1), UInt(1)(0))
             final_result = need_negate.select(negated_result, unsigned_result)
             
-            log("MUL CYCLE 3 SIGN: saved_sign={}, is_unsigned_only={}, need_negate={}", 
-                saved_sign, is_unsigned_only, need_negate)
-            log("MUL CYCLE 3: unsigned_result={:016x}, negated_result={:016x}, final_result={:016x}", 
-                unsigned_result, negated_result, final_result)
+            # log("MUL CYCLE 3 SIGN: saved_sign={}, is_unsigned_only={}, need_negate={}", 
+            #     saved_sign, is_unsigned_only, need_negate)
+            # log("MUL CYCLE 3: unsigned_result={:016x}, negated_result={:016x}, final_result={:016x}", 
+            #     unsigned_result, negated_result, final_result)
             
             # 步骤4: 根据mul_op选择高32位或低32位
             result_low = final_result[0:31].bitcast(UInt(32))
@@ -904,8 +904,8 @@ class ExecuteStage(Module):
             
             # MUL: 低32位; MULH/MULHSU/MULHU: 高32位
             mul_result_val = (saved_op == UInt(3)(MUL_OP_MUL)).select(result_low, result_high)
-            log("MUL CYCLE 3 RESULT: result_high={:08x}, result_low={:08x}, saved_op={}, final_result_val={:08x}", 
-                result_high, result_low, saved_op, mul_result_val)
+            # log("MUL CYCLE 3 RESULT: result_high={:08x}, result_low={:08x}, saved_op={}, final_result_val={:08x}", 
+            #     result_high, result_low, saved_op, mul_result_val)
             mul_result_reg[0] = mul_result_val
             mul_valid[0] = UInt(1)(1)
             mul_cycle_counter[0] = UInt(2)(0)
@@ -1221,8 +1221,8 @@ class ExecuteStage(Module):
         # 优先级：div_done > mul_done > normal_alu_result
         div_result_val = div_result_reg[0]
         alu_result = div_done.select(div_result_val, mul_done.select(current_mul_result, normal_alu_result))
-        log("EX RESULT: PC={:08x}, alu_op={:05b}, alu_a={:08x}, alu_b={:08x}, normal_alu_result={:08x}, final_alu_result={:08x}",
-            pc_in, alu_op, alu_a, alu_b, normal_alu_result, alu_result)
+        # log("EX RESULT: PC={:08x}, alu_op={:05b}, alu_a={:08x}, alu_b={:08x}, normal_alu_result={:08x}, final_alu_result={:08x}",
+        #     pc_in, alu_op, alu_a, alu_b, normal_alu_result, alu_result)
         
         target_pc = (is_branch | is_jump).select(actual_target_pc, target_pc)
         target_pc = is_jumpr.select(new_pc.bitcast(UInt(32)), target_pc)
@@ -1281,9 +1281,9 @@ class ExecuteStage(Module):
         # 乘法或除法完成时，使用保存的控制信息
         should_pass = id_ex_valid[0] & ~mul_wait & ~div_wait
         pass_or_done = should_pass | mul_done | div_done  # 要么正常传递，要么完成
-        log("EX PASS LOGIC: PC={:08x}, id_ex_valid={}, should_pass={}, mul_wait={}, div_wait={}, mul_done={}, div_done={}, pass_or_done={}",
-            pc_in,
-            id_ex_valid[0], should_pass, mul_wait, div_wait, mul_done, div_done, pass_or_done)
+        # log("EX PASS LOGIC: PC={:08x}, id_ex_valid={}, should_pass={}, mul_wait={}, div_wait={}, mul_done={}, div_done={}, pass_or_done={}",
+        #     pc_in,
+        #     id_ex_valid[0], should_pass, mul_wait, div_wait, mul_done, div_done, pass_or_done)
 
         # PC: 完成时用保存的 PC，否则用当前 PC
         final_pc = mul_done.select(mul_pc, div_done.select(div_pc, pc_in))
@@ -1295,7 +1295,7 @@ class ExecuteStage(Module):
             ex_mem_control[0] = pass_or_done.select(final_control, UInt(CONTROL_LEN)(0))
             ex_mem_result[0] = pass_or_done.select(alu_result, UInt(XLEN)(0))
             ex_mem_data[0] = pass_or_done.select(rs2_data, UInt(XLEN)(0))
-            log("EX DATA PATH: PC={:08x}, rs2_data={:08x}, pass_or_done={}, ex_mem_data={:08x}", pc_in, rs2_data, pass_or_done, ex_mem_data[0])
+            # log("EX DATA PATH: PC={:08x}, rs2_data={:08x}, pass_or_done={}, ex_mem_data={:08x}", pc_in, rs2_data, pass_or_done, ex_mem_data[0])
             
             # log("EX: PC={}, ALU_OP={:05b}, ALU_A={}, ALU_B={}, Result={:08x}, PC_Change={}, Target_PC={:08x}, Immediate={:08x}, ALU_SRC={}",
             #     pc_in, alu_op, alu_a, alu_b, alu_result, pc_change, target_pc, immediate_in, alu_src)
@@ -1363,8 +1363,8 @@ class ExecuteStage(Module):
             ex_mem_prediction_result[0]
         )
         
-        log("EX SIGNALS: pass_or_done={}, ex_mem_valid={}, pc_change={}, out_pc_change={}, control_in={:012x}, ex_sig_control={:012x}, out_control={:012x}",
-            pass_or_done, ex_mem_valid[0], pc_change, out_pc_change, control_in, ex_sig_control[0], out_control)
+        # log("EX SIGNALS: pass_or_done={}, ex_mem_valid={}, pc_change={}, out_pc_change={}, control_in={:012x}, ex_sig_control={:012x}, out_control={:012x}",
+        #     pass_or_done, ex_mem_valid[0], pc_change, out_pc_change, control_in, ex_sig_control[0], out_control)
         
         # 更新寄存器（只在 ex_mem_valid=1 时更新）
         with Condition(ex_mem_valid[0]):
@@ -1409,10 +1409,10 @@ class MemoryStage(Module):
         byte_offset = addr_in[0:1]  # 地址低2位
         
         # DEBUG: Log memory operations
-        with Condition(mem_read & ex_mem_valid[0]):
-            log("MEM READ: addr={:08x}, word_addr={:08x}, byte_offset={}", addr_in, word_addr, byte_offset)
-        with Condition(mem_write & ex_mem_valid[0]):
-            log("MEM WRITE: addr={:08x}, word_addr={:08x}, byte_offset={}, data={:08x}", addr_in, word_addr, byte_offset, data_in)
+        # with Condition(mem_read & ex_mem_valid[0]):
+        #     log("MEM READ: addr={:08x}, word_addr={:08x}, byte_offset={}", addr_in, word_addr, byte_offset)
+        # with Condition(mem_write & ex_mem_valid[0]):
+        #     log("MEM WRITE: addr={:08x}, word_addr={:08x}, byte_offset={}, data={:08x}", addr_in, word_addr, byte_offset, data_in)
         
         # store_type: 00=SB, 01=SH, 10=SW
         is_sb = (store_type == UInt(2)(0b00))
@@ -1509,15 +1509,15 @@ class MemoryStage(Module):
         data_sram.build(we=sram_we, re=sram_re, addr=sram_addr, wdata=sram_wdata)
         
         # DEBUG logs
-        with Condition(do_rmw_write):
-            log("MEM RMW WRITE PHASE: original_data={:08x}, saved_data={:08x}", original_data, saved_data)
-            log("MEM RMW WRITE: addr={:08x}, wdata={:08x}", saved_word_addr, rmw_write_data)
-        with Condition(do_rmw_read):
-            log("MEM RMW READ: word_addr={:08x}", word_addr)
-        with Condition(do_sw_write):
-            log("MEM WRITE SW: word_addr={:08x}, wdata={:08x}", word_addr, data_in)
-        with Condition(do_load_read):
-            log("MEM READ SRAM: word_addr={:08x}", word_addr)
+        # with Condition(do_rmw_write):
+        #     log("MEM RMW WRITE PHASE: original_data={:08x}, saved_data={:08x}", original_data, saved_data)
+        #     log("MEM RMW WRITE: addr={:08x}, wdata={:08x}", saved_word_addr, rmw_write_data)
+        # with Condition(do_rmw_read):
+        #     log("MEM RMW READ: word_addr={:08x}", word_addr)
+        # with Condition(do_sw_write):
+        #     log("MEM WRITE SW: word_addr={:08x}, wdata={:08x}", word_addr, data_in)
+        # with Condition(do_load_read):
+        #     log("MEM READ SRAM: word_addr={:08x}", word_addr)
         
         with Condition(mem_wb_valid[0]):
             # ===== WRITE阶段：更新状态机 =====
@@ -1536,8 +1536,8 @@ class MemoryStage(Module):
                     sb_sh_state[0] = UInt(2)(2)
                 
                 mem_wb_mem_data[0] = data_sram.dout[0]
-                log("MEM UPDATE: mem_wb_mem_data={:08x}", mem_wb_mem_data[0])
-                log("MEM SRAM DOUT: data_sram.dout={:08x}", data_sram.dout[0])
+                # log("MEM UPDATE: mem_wb_mem_data={:08x}", mem_wb_mem_data[0])
+                # log("MEM SRAM DOUT: data_sram.dout={:08x}", data_sram.dout[0])
             
             with Condition(is_idle & ~ex_mem_valid[0]):
                 mem_wb_mem_data[0] = UInt(XLEN)(0)
@@ -1606,19 +1606,19 @@ class WriteBackStage(Module):
                              (load_type == UInt(3)(0b010)).select(wbs_lw_data,
                              (load_type == UInt(3)(0b100)).select(wbs_lbu_data, wbs_lhu_data))))
         
-        log("WB LOAD PROCESS: mem_data_in={:08x}, load_type={:03b}, processed_mem_data={:08x}",
-            mem_data_in, load_type, processed_mem_data)
+        # log("WB LOAD PROCESS: mem_data_in={:08x}, load_type={:03b}, processed_mem_data={:08x}",
+        #     mem_data_in, load_type, processed_mem_data)
             
         # 选择写回数据
         wb_data = mem_to_reg.select(processed_mem_data, ex_result_in)
         
-        log("WB STAGE: ex_result_in={:08x}, mem_to_reg={}, wb_data={:08x}, wb_rd={}, reg_write={}, load_type={:03b}",
-            ex_result_in, mem_to_reg, wb_data, wb_rd, reg_write, load_type)
+        # log("WB STAGE: ex_result_in={:08x}, mem_to_reg={}, wb_data={:08x}, wb_rd={}, reg_write={}, load_type={:03b}",
+        #     ex_result_in, mem_to_reg, wb_data, wb_rd, reg_write, load_type)
             
         # 如果指令无效，直接返回
         with Condition(mem_wb_valid[0]):
             with Condition(reg_write):
-                log("WB WRITE: reg[{}] = {:08x}", wb_rd, wb_data)
+                # log("WB WRITE: reg[{}] = {:08x}", wb_rd, wb_data)
                 reg_file[wb_rd] = wb_data
 
         writeback_signals = control_in.bitcast(Bits(CONTROL_LEN))
@@ -1694,8 +1694,8 @@ class HazardUnit(Downstream):
         rd_mem = memory_control[25:29]
         reg_write_mem = memory_control[7:7]
         mem_read_mem = memory_control[5:5]  # 解析 mem_read 信号用于检测 Load-Use 冒险
-        log("HAZARD memory_control: id_ex_valid={}, memory_control={:012x}, rd_mem={}, reg_write_mem={}, mem_read_mem={}",
-            id_ex_valid[0], memory_control, rd_mem, reg_write_mem, mem_read_mem)
+        # log("HAZARD memory_control: id_ex_valid={}, memory_control={:012x}, rd_mem={}, reg_write_mem={}, mem_read_mem={}",
+        #     id_ex_valid[0], memory_control, rd_mem, reg_write_mem, mem_read_mem)
         
         # 解析memory_signals: [0:CONTROL_LEN-1] = control, [CONTROL_LEN] = sb_sh_active
         mem_sig_control = memory_signals[0:CONTROL_LEN-1].bitcast(UInt(CONTROL_LEN))
@@ -1710,8 +1710,8 @@ class HazardUnit(Downstream):
         # Load-Use 冒险：MEM 阶段为 Load 指令（mem_read=1）且目标寄存器与 ID 阶段源寄存器相同
         load_use_hazard_mem = (mem_read_mem & reg_write_mem & (rd_mem != UInt(5)(0)) & 
                                ((needs_rs1 & (rs1 == rd_mem)) | (needs_rs2 & (rs2 == rd_mem))))
-        log("LOAD_USE_HAZARD_MEM: mem_read_mem={}, reg_write_mem={}, rd_mem={}, rs1={}, rs2={}, needs_rs1={}, needs_rs2={}, rs1==rd_mem={}, rs2==rd_mem={}, result={}",
-            mem_read_mem, reg_write_mem, rd_mem, rs1, rs2, needs_rs1, needs_rs2, (rs1 == rd_mem), (rs2 == rd_mem), load_use_hazard_mem)
+        # log("LOAD_USE_HAZARD_MEM: mem_read_mem={}, reg_write_mem={}, rd_mem={}, rs1={}, rs2={}, needs_rs1={}, needs_rs2={}, rs1==rd_mem={}, rs2==rd_mem={}, result={}",
+        #     mem_read_mem, reg_write_mem, rd_mem, rs1, rs2, needs_rs1, needs_rs2, (rs1 == rd_mem), (rs2 == rd_mem), load_use_hazard_mem)
         
         # WB 阶段 Load-Use 冒险（理论上通过前递可以解决，但作为安全检测保留）
         load_use_hazard_wb = (mem_read_wb & reg_write_wb & (rd_wb != UInt(5)(0)) & 
@@ -1785,12 +1785,12 @@ class HazardUnit(Downstream):
         # 4. 除法器执行中（state != 0，需要等待除法完成）
         # 5. 除法结果冒险（下一条指令依赖除法结果）
         data_hazard = ((load_use_hazard_mem | mul_executing | mul_result_hazard | div_executing | div_result_hazard | sb_sh_stall) & ~need_flush)
-        log("HAZARD: data_hazard={}, load_use_hazard_mem={}, sb_sh_stall={}, need_flush={}",
-            data_hazard, load_use_hazard_mem, sb_sh_stall, need_flush)
-        log("HAZARD DETAIL: rd_mem={}, rs1={}, rs2={}, needs_rs1={}, needs_rs2={}, mem_read_mem={}, reg_write_mem={}",
-            rd_mem, rs1, rs2, needs_rs1, needs_rs2, mem_read_mem, reg_write_mem)
-        log("HAZARD MUL/DIV: mul_cycle={}, mul_executing={}, mul_result_hazard={}, mul_exec_haz={}, mul_new_haz={}, div_state={}, div_executing={}, div_result_hazard={}",
-            mul_cycle, mul_executing, mul_result_hazard, mul_executing_hazard, mul_new_inst_hazard, div_state_val, div_executing, div_result_hazard)
+        # log("HAZARD: data_hazard={}, load_use_hazard_mem={}, sb_sh_stall={}, need_flush={}",
+        #     data_hazard, load_use_hazard_mem, sb_sh_stall, need_flush)
+        # log("HAZARD DETAIL: rd_mem={}, rs1={}, rs2={}, needs_rs1={}, needs_rs2={}, mem_read_mem={}, reg_write_mem={}",
+        #     rd_mem, rs1, rs2, needs_rs1, needs_rs2, mem_read_mem, reg_write_mem)
+        # log("HAZARD MUL/DIV: mul_cycle={}, mul_executing={}, mul_result_hazard={}, mul_exec_haz={}, mul_new_haz={}, div_state={}, div_executing={}, div_result_hazard={}",
+        #     mul_cycle, mul_executing, mul_result_hazard, mul_executing_hazard, mul_new_inst_hazard, div_state_val, div_executing, div_result_hazard)
         
         # id_ex_valid 的含义：EX阶段是否有有效指令需要执行
         # - need_flush时，EX阶段指令作废，设为0
@@ -2055,7 +2055,7 @@ def build_cpu(program_file="test_program.txt"):
         pc = RegArray(UInt(XLEN), 1, initializer=[0])
         stall = RegArray(UInt(1), 1, initializer=[0])
         
-        data_sram = SRAM(width=XLEN, depth=65536, init_file="data.hex")
+        data_sram = SRAM(width=XLEN, depth=0x40000, init_file="data.hex")
         hazard_unit = HazardUnit()
         fetch_stage = FetchStage()
         decode_stage = DecodeStage()
@@ -2082,7 +2082,7 @@ def test_rv32i_cpu(program_file="test_program.txt"):
     sys = build_cpu(program_file)
     
     # 生成模拟器
-    simulator_path, _ = elaborate(sys, verilog=False, sim_threshold=2500, resource_base='.')
+    simulator_path, _ = elaborate(sys, verilog=False, sim_threshold=500000, resource_base='.')
     raw = utils.run_simulator(simulator_path)
     with open("result.out", 'w', encoding='utf-8') as f:
         print(raw, file=f)
